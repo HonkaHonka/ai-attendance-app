@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Faculty Attendance App</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h2 { color: #333; border-bottom: 2px solid #0056b3; padding-bottom: 10px; }
+        
+        /* Sections */
+        #login-section, #classes-section, #students-section { display: none; }
+        .active-section { display: block !important; }
+        
+        /* Login */
+        input[type="email"] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;}
+        button { background-color: #0056b3; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-size: 16px;}
+        button:hover { background-color: #004494; }
+        .back-btn { background-color: #6c757d; margin-bottom: 15px; }
+
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background-color: #e9ecef; color: #333; }
+        
+        /* Make table rows clickable */
+        .clickable-row { cursor: pointer; transition: background-color 0.2s; }
+        .clickable-row:hover { background-color: #f1f8ff; }
+        
+        .error { color: red; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    
+    <!-- 1. LOGIN SECTION -->
+    <div id="login-section" class="active-section">
+        <h2>Faculty Sign In</h2>
+        <p>Please enter your faculty email to continue (e.g., ihab.awad@lu.ac.ae):</p>
+        <input type="email" id="emailInput" placeholder="Enter your email...">
+        <button onclick="handleLogin()">Sign In</button>
+        <p id="loginError" class="error"></p>
+    </div>
+
+    <!-- 2. CLASSES SECTION -->
+    <div id="classes-section">
+        <h2 id="welcomeMessage">Your Classes</h2>
+        <div style="overflow-x:auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Class Nbr</th><th>Cass ID</th><th>Semester</th><th>Course Code</th>
+                        <th>Course Name</th><th>Start Time</th><th>End Time</th>
+                        <th>Campus Name</th><th>Room ID</th>
+                    </tr>
+                </thead>
+                <tbody id="classesTableBody">
+                    <!-- Classes will be injected here via JavaScript -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 3. STUDENTS SECTION -->
+    <div id="students-section">
+        <h2>Student List for Class: <span id="currentClassNbr"></span></h2>
+        <button class="back-btn" onclick="showSection('classes-section')">← Back to Classes</button>
+        <div style="max-width: 600px;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Student ID</th>
+                        <th>Student Name</th>
+                    </tr>
+                </thead>
+                <tbody id="studentsTableBody">
+                    <!-- Students will be injected here via JavaScript -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    const API_BASE = "http://127.0.0.1:8000/api";
+    let currentUserEmail = "";
+
+    // Helper: Switch between views
+    function showSection(sectionId) {
+        document.getElementById('login-section').classList.remove('active-section');
+        document.getElementById('classes-section').classList.remove('active-section');
+        document.getElementById('students-section').classList.remove('active-section');
+        document.getElementById(sectionId).classList.add('active-section');
+    }
+
+    // STEP 1: LOGIN
+    async function handleLogin() {
+        const email = document.getElementById('emailInput').value.trim();
+        const errorMsg = document.getElementById('loginError');
+        errorMsg.innerText = "";
+
+        if(!email) { errorMsg.innerText = "Please enter an email."; return; }
+
+        try {
+            const response = await fetch(`${API_BASE}/login?email=${encodeURIComponent(email)}`);
+            if (!response.ok) throw new Error("Faculty email not found.");
+            
+            const data = await response.json();
+            currentUserEmail = data.email;
+            document.getElementById('welcomeMessage').innerText = `Welcome, ${data.name} - Your Classes`;
+            
+            // Proceed to fetch classes
+            fetchClasses(currentUserEmail);
+            
+        } catch (error) {
+            errorMsg.innerText = error.message;
+        }
+    }
+
+    // STEP 2: LOAD CLASSES
+    async function fetchClasses(email) {
+        try {
+            const response = await fetch(`${API_BASE}/classes?email=${encodeURIComponent(email)}`);
+            const classes = await response.json();
+            
+            const tbody = document.getElementById('classesTableBody');
+            tbody.innerHTML = ""; // Clear old data
+
+            classes.forEach(cls => {
+                const tr = document.createElement('tr');
+                tr.className = "clickable-row";
+                // When clicked, fetch students for this specific class
+                tr.onclick = () => fetchStudents(email, cls['Class Nbr']);
+
+                tr.innerHTML = `
+                    <td>${cls['Class Nbr'] || ''}</td>
+                    <td>${cls['Cass ID'] || ''}</td>
+                    <td>${cls['Semester'] || ''}</td>
+                    <td>${cls['Course Code'] || ''}</td>
+                    <td>${cls['Course Name'] || ''}</td>
+                    <td>${cls['Start Time'] || ''}</td>
+                    <td>${cls['End Time'] || ''}</td>
+                    <td>${cls['Campus Name'] || ''}</td>
+                    <td>${cls['Room ID'] || ''}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            showSection('classes-section');
+
+        } catch (error) {
+            alert("Error loading classes: " + error.message);
+        }
+    }
+
+    // STEP 3: LOAD STUDENTS
+    async function fetchStudents(email, classNbr) {
+        try {
+            const response = await fetch(`${API_BASE}/students?email=${encodeURIComponent(email)}&class_nbr=${classNbr}`);
+            const students = await response.json();
+            
+            document.getElementById('currentClassNbr').innerText = classNbr;
+            const tbody = document.getElementById('studentsTableBody');
+            tbody.innerHTML = ""; // Clear old data
+
+            students.forEach(student => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${student['Student ID'] || ''}</td>
+                    <td>${student['Student Name'] || ''}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            showSection('students-section');
+
+        } catch (error) {
+            alert("Error loading students: " + error.message);
+        }
+    }
+</script>
+</body>
+</html>
