@@ -31,7 +31,7 @@ python main.py
 AI_attendance_app/
 │
 ├── data/
-│   └── data.xlsx          # Institutional database (Faculty, Classes, Students)
+│   └── KHC_REGISTERED_STUDENTS_31560.xlsx          # Institutional database (Faculty, Classes, Students)
 │
 ├── frontend/              # React Application
 │   ├── src/

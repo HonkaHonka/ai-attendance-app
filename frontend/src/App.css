@@ -45,28 +45,24 @@ body, html { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, sans-serif;
 .stat-text h4 { margin: 0; color: var(--primary-dark); font-size: 18px; }
 .stat-text p { margin: 5px 0 0 0; color: #777; font-size: 14px; }
 
-/* --- ABOUT SECTION (FIXED: Image Background Overlay) --- */
+/* --- ABOUT SECTION --- */
 .about-section {
   background: linear-gradient(rgba(47, 50, 84, 0.92), rgba(47, 50, 84, 0.92)), url('https://images.unsplash.com/photo-1523050854058-8df90110c9f1?auto=format&fit=crop&q=80') center/cover fixed;
-  color: white;
-  padding: 80px 10%;
-  display: flex;
-  align-items: center;
-  gap: 60px;
+  color: white; padding: 80px 10%; display: flex; align-items: center; gap: 60px;
 }
 .about-logo-placeholder { flex: 0 0 200px; text-align: center; font-size: 150px; opacity: 0.8; }
 .about-content { flex: 1; }
 .about-content h2 { color: var(--accent-gold); font-size: 32px; margin-top: 0; margin-bottom: 20px;}
 .about-content p { line-height: 1.8; font-size: 16px; color: #e0e0e0; margin-bottom: 15px;}
 
-/* --- SERVICES SECTION (FIXED: Added Icons) --- */
+/* --- SERVICES SECTION --- */
 .services-section { background-color: var(--primary-dark); color: white; padding: 80px 10%; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 40px; }
 .service-icon-top { font-size: 40px; color: var(--accent-gold); margin-bottom: 15px; display: block;}
 .service-card h3 { color: white; font-size: 20px; border-bottom: 2px solid #555; padding-bottom: 10px; margin-top: 0;}
 .service-card p { color: #ccc; font-size: 14px; line-height: 1.6; margin-bottom: 20px;}
 .service-card a { color: var(--accent-gold); text-decoration: none; font-size: 14px; font-weight: bold; cursor: pointer;}
 
-/* --- PARTNERS SECTION (NEW) --- */
+/* --- PARTNERS SECTION --- */
 .partners-section { background-color: #ffffff; padding: 60px 10%; text-align: center; }
 .partners-grid { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 30px; margin-bottom: 30px; }
 .partner-logo-box { padding: 15px; border: 1px solid #eee; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); background: #fff; min-width: 150px; text-align: center; transition: transform 0.3s; }
@@ -97,3 +93,89 @@ tr.clickable-row:hover { background-color: #f1f4f9; border-left: 4px solid var(-
 .footer-grid a { color: #ccc; text-decoration: none; cursor: pointer; }
 .footer-grid a:hover { color: var(--accent-gold); }
 .social-icons span { display: inline-block; background: var(--accent-gold); color: var(--primary-dark); width: 35px; height: 35px; text-align: center; line-height: 35px; border-radius: 50%; margin-right: 10px; font-weight: bold; cursor: pointer;}
+
+/* --- ENROLLMENT MODAL --- */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+  background: rgba(0, 0, 0, 0.85); display: flex; align-items: center; justify-content: center;
+  z-index: 2000;
+}
+.modal-content {
+  background: white; padding: 30px; border-radius: 12px; max-width: 650px; width: 90%;
+  box-shadow: 0 15px 30px rgba(0,0,0,0.5); text-align: center;
+}
+.modal-header { color: var(--primary-dark); border-bottom: 2px solid var(--accent-gold); padding-bottom: 10px; margin-bottom: 20px;}
+.webcam-container {
+  position: relative; border-radius: 12px; overflow: hidden; border: 4px solid var(--primary-dark);
+  margin-bottom: 20px; background: #000; min-height: 350px;
+}
+.webcam-overlay-text {
+  position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: rgba(255, 203, 5, 0.95); color: var(--primary-dark); padding: 12px 25px;
+  border-radius: 30px; font-weight: bold; font-size: 16px; width: 85%;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+}
+
+/* --- NEW: SMART AI TRACKING UI --- */
+.scan-progress-bar {
+  display: flex; justify-content: center; gap: 15px; margin-bottom: 20px;
+}
+.scan-progress-bar span {
+  background: #e9ecef; color: #6c757d; padding: 8px 16px;
+  border-radius: 20px; font-size: 14px; font-weight: bold; transition: all 0.3s ease;
+}
+.scan-progress-bar span.active {
+  background: var(--accent-gold); color: var(--primary-dark);
+  box-shadow: 0 0 12px rgba(255, 203, 5, 0.6); transform: scale(1.05);
+}
+.scan-progress-bar span.done {
+  background: #28a745; color: white;
+  box-shadow: 0 0 10px rgba(40, 167, 69, 0.4);
+}
+
+/* --- THE TARGET FACE FRAME WITH GLOW ANIMATION --- */
+.webcam-mask {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -60%);
+  width: 220px; 
+  height: 300px;
+  border-radius: 50%;
+  border: 4px dashed var(--accent-gold);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7); /* Darkens the outside of the oval */
+  pointer-events: none; 
+  z-index: 10;
+  transition: all 0.4s ease-in-out;
+}
+
+.webcam-mask.mask-complete {
+  border: 6px solid #28a745;
+  background: rgba(40, 167, 69, 0.15); /* Slight green tint inside the oval */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.85), 0 0 30px #28a745 inset, 0 0 30px #28a745;
+  transform: translate(-50%, -60%) scale(1.05); /* Slight pop effect */
+}
+
+
+/* --- BUTTONS --- */
+.btn-capture {
+  background: var(--primary-dark); color: white; border: none; padding: 12px 25px;
+  font-size: 16px; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; margin: 5px;
+}
+.btn-capture:hover:not(:disabled) { background: var(--accent-gold); color: var(--primary-dark); }
+.btn-capture:disabled { background: #555; cursor: not-allowed; }
+.btn-cancel {
+  background: #dc3545; color: white; border: none; padding: 12px 25px;
+  font-size: 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin: 5px;
+}
+.btn-enroll-small {
+  background: var(--accent-gold); color: var(--primary-dark); border: none; padding: 8px 14px;
+  border-radius: 4px; font-weight: bold; cursor: pointer; transition: 0.2s;
+}
+.btn-enroll-small:hover { background: #e6b700; transform: scale(1.05);}
+
+/* Student Select List in Modal */
+.student-select-list { max-height: 300px; overflow-y: auto; text-align: left; margin-top: 15px;}
+.student-select-item {
+  padding: 12px; border-bottom: 1px solid #eee; cursor: pointer; display: flex; justify-content: space-between; font-size: 16px;
+}
+.student-select-item:hover { background: #f1f4f9; border-left: 4px solid var(--accent-gold); }
