@@ -12,3 +12,5 @@ frontend/dist/
 frontend/.env
 
 data/
+
+yolov8n_openvino_model/

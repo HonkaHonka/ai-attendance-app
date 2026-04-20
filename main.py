@@ -4,8 +4,6 @@ from pydantic import BaseModel
 import pandas as pd
 import uvicorn
 import os
-
-# --- PURE PYTORCH AI IMPORTS ---
 import base64
 import numpy as np
 import pickle
@@ -15,7 +13,8 @@ from PIL import Image
 import io
 import cv2
 from ultralytics import YOLO 
-
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 app = FastAPI(title="Attendance App Backend")
 
 app.add_middleware(
@@ -27,19 +26,22 @@ app.add_middleware(
 )
 
 print("\n" + "="*50)
-print(f"🚀 CHECKING FOR NVIDIA GPU...")
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+print(f"🚀 CPU SIMULATION MODE (INTEL OPENVINO TEST)")
+# FORCE THE AI ONTO THE CPU TO SIMULATE THE TV
+device = torch.device('cpu') 
 print(f"🚀 AI MODELS WILL RUN ON: {device.type.upper()}")
 print("="*50 + "\n")
 
-print("Loading MTCNN Face Detector into VRAM...")
+print("Loading MTCNN Face Detector (CPU)...")
 mtcnn = MTCNN(keep_all=False, device=device) 
-print("Loading InceptionResnetV1 (DNA Extractor) into VRAM...")
+print("Loading InceptionResnetV1 (CPU)...")
 resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device) 
-print("Loading YOLOv8 (Crowd Tracker) into VRAM...")
-yolo_model = YOLO('yolov8n.pt') 
-yolo_model.to(device)
-print("✅ ALL GPU AI MODELS ARE READY!")
+
+print("Loading YOLOv8 (Intel OpenVINO Optimized)...")
+# WE POINT YOLO TO THE NEW OPENVINO FOLDER INSTEAD OF THE .PT FILE
+yolo_model = YOLO('yolov8n_openvino_model/') 
+
+print("✅ ALL CPU AI MODELS ARE READY!")
 
 # 1. Load the Excel Data & AI Memory
 DATA_FILE = "data/KHC_REGISTERED_STUDENTS_31560.xlsx"
@@ -111,7 +113,7 @@ def enroll_face(payload: EnrollPayload):
                     student_embeddings.append(embedding[0].tolist())
             except Exception as e: pass
             
-    if len(student_embeddings) == 0: raise HTTPException(status_code=400, detail="GPU could not detect a clear face.")
+    if len(student_embeddings) == 0: raise HTTPException(status_code=400, detail="Could not detect a clear face.")
          
     face_db[payload.student_id] = {"name": payload.student_name, "embeddings": student_embeddings }
     with open(MEMORY_FILE, 'wb') as f: pickle.dump(face_db, f)
@@ -160,7 +162,7 @@ class SweepPayload(BaseModel):
 def surveillance_sweep(payload: SweepPayload):
     face_db = load_memory()
     detected_students =[]
-    save_required = False # Tracks if the AI learned a new angle
+    save_required = False 
 
     try:
         b64_str = payload.image
@@ -169,6 +171,7 @@ def surveillance_sweep(payload: SweepPayload):
         img_pil = Image.open(io.BytesIO(image_data)).convert('RGB')
         img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
         
+        # YOLO is now running via Intel OpenVINO!
         results = yolo_model(img_cv, classes=[0], verbose=False)
         THRESHOLD = 1.0
 
@@ -193,11 +196,14 @@ def surveillance_sweep(payload: SweepPayload):
                             best_match_id = student_id
                             
                 if best_match_score < THRESHOLD:
-                    # --- CONTINUOUS ACTIVE LEARNING ---
-                    # If the AI recognizes them, but has less than 15 saved angles, it learns this new angle!
-                    if len(face_db[best_match_id]["embeddings"]) < 15:
+                    confidence_val = (1 - (best_match_score / 1.5)) * 100
+                    
+                    # --- NEW SMART ACTIVE LEARNING ---
+                    # Only learn the face if confidence is between 80% and 96% AND we have less than 20 vectors
+                    if 80.0 < confidence_val < 96.0 and len(face_db[best_match_id]["embeddings"]) < 20:
                         face_db[best_match_id]["embeddings"].append(live_embedding.tolist())
                         save_required = True
+                        print(f"🧠 SMART LEARNING: Saved new angle for {best_match_name} (Confidence was {confidence_val:.1f}%)")
                         
                     detected_students.append({"name": best_match_name, "student_id": best_match_id, "box":[x1, y1, x2-x1, y2-y1], "status": "known"})
                 else:
@@ -216,12 +222,11 @@ class QuickEnrollPayload(BaseModel):
     student_id: str
     student_name: str
     image: str
-    box: list #[x, y, w, h]
+    box: list 
 
 @app.post("/api/quick-enroll")
 def quick_enroll(payload: QuickEnrollPayload):
     face_db = load_memory()
-    
     b64_str = payload.image
     if ',' in b64_str: b64_str = b64_str.split(',')[1]
     image_data = base64.b64decode(b64_str)
@@ -238,7 +243,7 @@ def quick_enroll(payload: QuickEnrollPayload):
         embedding = resnet(face_tensor.unsqueeze(0).to(device)).detach().cpu().numpy()[0].tolist()
         
         if payload.student_id not in face_db:
-            face_db[payload.student_id] = {"name": payload.student_name, "embeddings": []}
+            face_db[payload.student_id] = {"name": payload.student_name, "embeddings":[]}
             
         face_db[payload.student_id]["embeddings"].append(embedding)
         
@@ -246,7 +251,12 @@ def quick_enroll(payload: QuickEnrollPayload):
         return {"status": "success", "message": f"{payload.student_name} successfully enrolled via Live Click!"}
         
     except Exception as e:
-        raise HTTPException(status_code=400, detail="Could not extract biometric DNA from this specific angle. Please try again when they look closer to the camera.")
-
+        raise HTTPException(status_code=400, detail="Could not extract biometric DNA. Please try again.")
+# --- 9. SERVE REACT FRONTEND (PRODUCTION) ---
+# This must be at the bottom so it doesn't block the /api routes!
+if os.path.exists("frontend/dist"):
+    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="spa")
+else:
+    print("⚠️ WARNING: 'frontend/dist' folder not found. Please run 'npm run build' in the frontend folder.")
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
