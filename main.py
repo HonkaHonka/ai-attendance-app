@@ -141,37 +141,55 @@ def process_surveillance_frame(image_data_str):
     img_pil = Image.open(io.BytesIO(base64.b64decode(image_data_str))).convert('RGB')
     img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
     
-    # 🔥 YOLO TRACKING: persist=True remembers bodies, botsort tracks movement
-    results = yolo_model.track(img_cv, persist=True, tracker="botsort.yaml", verbose=False)
+    # 🔥 FIX 1: Add classes=[0] to strictly ignore chairs, desks, walls, etc.
+    results = yolo_model.track(
+        img_cv, 
+        persist=True, 
+        tracker="botsort.yaml", 
+        conf=0.6, 
+        iou=0.4, 
+        classes=[0], # 👈 CRITICAL ADDITION
+        verbose=False
+    )
+    
     MATCH_THRESHOLD = 0.65 
     detected_students =[]
 
-    # 🔥 THE SMART QUEUE: Only scan a max of 3 UNKNOWN faces per frame
     MAX_SCANS_PER_FRAME = 3
     scans_this_frame = 0
 
     if results[0].boxes is not None and results[0].boxes.id is not None:
         boxes = results[0].boxes.xyxy.cpu().numpy()
         track_ids = results[0].boxes.id.cpu().numpy()
+        confs = results[0].boxes.conf.cpu().numpy() # 🔥 Extract confidences manually
 
-        for box, track_id in zip(boxes, track_ids):
+        # 🔥 FIX 2: Zip confidences into the loop
+        for box, track_id, conf in zip(boxes, track_ids, confs):
+            
+            # 🔥 FIX 3: Manually enforce confidence (Tracker sometimes bypasses the conf=0.6 flag)
+            if conf < 0.6:
+                continue
+                
             track_id = int(track_id)
             x1, y1, x2, y2 = map(int, box)
             
-            # Pad the bounding box slightly to get the full head (better for ResNet)
+            # 🔥 FIX 4: Size Sanity Check. If a box is ridiculously large (e.g., > 60% of the screen), ignore it!
+            box_width = x2 - x1
+            box_height = y2 - y1
+            if box_width > (img_pil.width * 0.6) or box_height > (img_pil.height * 0.6):
+                continue # Skip this box, it's a glitch tracking the wall/room
+            
+            # Pad the bounding box slightly to get the full head
             pad = 10
             x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
             x2, y2 = min(img_pil.width, x2 + pad), min(img_pil.height, y2 + pad)
 
             if track_id in live_tracker_memory and live_tracker_memory[track_id]["status"] != "scanning":
-                # WE ALREADY KNOW THIS PERSON! Skip heavy AI, just draw the box!
                 person_data = live_tracker_memory[track_id]
             else:
-                # NEW PERSON! Check if we have room in the queue to scan them
                 if scans_this_frame < MAX_SCANS_PER_FRAME:
                     scans_this_frame += 1
                     
-                    # Crop and process face
                     person_crop = img_pil.crop((x1, y1, x2, y2))
                     face_tensor = face_preprocess(person_crop).unsqueeze(0).to(device)
                     live_embedding = resnet(face_tensor).detach().cpu().numpy()[0]
@@ -180,7 +198,6 @@ def process_surveillance_frame(image_data_str):
                     best_match_id = None
                     best_match_score = -1.0 
                     
-                    # Search Database
                     for student_id, data in global_face_db.items():
                         for saved_embedding in data["embeddings"]:
                             similarity = get_cosine_similarity(live_embedding, saved_embedding)
@@ -191,11 +208,9 @@ def process_surveillance_frame(image_data_str):
                                 
                     if best_match_score > MATCH_THRESHOLD:
                         confidence_val = best_match_score * 100
-                        # Active Learning
                         if 80.0 < confidence_val < 96.0 and len(global_face_db[best_match_id]["embeddings"]) < 20:
                             global_face_db[best_match_id]["embeddings"].append(live_embedding.tolist())
                             save_required = True
-                            print(f"🧠 SMART LEARNING: Saved angle for {best_match_name}")
                             
                         person_data = {"name": best_match_name, "student_id": best_match_id, "status": "known"}
                     else:
@@ -203,15 +218,13 @@ def process_surveillance_frame(image_data_str):
                         
                     live_tracker_memory[track_id] = person_data
                 else:
-                    # Queue is full! Mark them as scanning and we will scan them in the next frame
                     person_data = {"name": "Scanning...", "student_id": None, "status": "scanning"}
                     live_tracker_memory[track_id] = person_data
 
-            # Add to the final UI payload
             detected_students.append({
                 "name": person_data["name"], 
                 "student_id": person_data["student_id"], 
-                "box": [x1, y1, x2-x1, y2-y1], 
+                "box":[x1, y1, box_width, box_height], 
                 "status": person_data["status"]
             })
 
