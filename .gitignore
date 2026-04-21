@@ -6,9 +6,11 @@ venv/
 env/
 .env
 
-# Node / React (Frontend)
-
-
+# Data
 data/
 
+# AI Models (Downloaded and Generated locally)
+yolov8n.pt
 yolov8n_openvino_model/
+yolov8n-face.pt
+yolov8n-face_openvino_model/
