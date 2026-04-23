@@ -9,7 +9,6 @@ import numpy as np
 import pickle
 import torch
 from facenet_pytorch import MTCNN, InceptionResnetV1
-from torchvision import transforms 
 from PIL import Image
 import io
 import cv2
@@ -35,21 +34,15 @@ device = torch.device('cpu')
 print(f"🚀 AI MODELS WILL RUN ON: {device.type.upper()}")
 print("="*50 + "\n")
 
-# Native PyTorch Resizer for YOLO face crops
-face_preprocess = transforms.Compose([
-    transforms.Resize((160, 160)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-])
-
-print("Loading MTCNN Face Detector (For 1-on-1 Enrollment)...")
+# 🔥 MTCNN IS BACK! We need this to tightly crop the face OUT of the YOLO body box.
+print("Loading MTCNN Face Detector (CPU)...")
 mtcnn = MTCNN(keep_all=False, device=device) 
 
-print("Loading InceptionResnetV1 (CPU)...")
+print("Loading InceptionResnetV1 (DNA Extractor)...")
 resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device) 
 
-print("Loading YOLOv8-Face (Intel OpenVINO Optimized)...")
-yolo_model = YOLO('yolov8n-face_openvino_model/', task='detect')
+print("Loading YOLOv8 (Crowd Tracker)...")
+yolo_model = YOLO('yolov8n_openvino_model/', task='detect')
 print("✅ ALL CPU AI MODELS ARE READY!")
 
 DATA_FILE = "data/KHC_REGISTERED_STUDENTS_31560.xlsx"
@@ -79,6 +72,7 @@ try:
     df = df.fillna("")
 except Exception as e: df = pd.DataFrame()
 
+# --- 1. BASIC API ENDPOINTS ---
 @app.get("/api/login")
 def login(email: str):
     user_exists = df[df['Faculty Email'].astype(str).str.lower() == email.lower()]
@@ -96,7 +90,8 @@ def get_students(email: str, class_nbr: int):
     class_data = df[(df['Faculty Email'].astype(str).str.lower() == email.lower()) & (df['Class Nbr'] == class_nbr)]
     return class_data[['Student ID', 'Student Name']].to_dict(orient="records")
 
-# --- ENROLL ENDPOINT (MTCNN for 1-on-1 full screen) ---
+
+# --- 2. ENROLL ENDPOINT ---
 class EnrollPayload(BaseModel):
     student_id: str
     student_name: str
@@ -113,6 +108,7 @@ def enroll_face(payload: EnrollPayload):
                 if ',' in b64_str: b64_str = b64_str.split(',')[1]
                 img = Image.open(io.BytesIO(base64.b64decode(b64_str))).convert('RGB')
                 
+                # MTCNN extracts the clean face perfectly
                 face_tensor = mtcnn(img)
                 if face_tensor is not None:
                     embedding = resnet(face_tensor.unsqueeze(0).to(device)).detach().cpu().numpy()
@@ -125,6 +121,7 @@ def enroll_face(payload: EnrollPayload):
     return {"status": "success", "message": f"Successfully memorized {payload.student_name}"}
 
 
+# --- 3. 1-ON-1 VERIFY ENDPOINT (RESTORED) ---
 class VerifyPayload(BaseModel):
     image: str  
 
@@ -158,7 +155,7 @@ def verify_face(payload: VerifyPayload):
     else: return {"status": "success", "match": False, "name": "Unknown"}
 
 
-# 🔥 DIRECT FACE TRACKER MEMORY
+# --- 4. LIVE SURVEILLANCE & SPATIAL TRACKING ---
 live_tracker_memory = {} 
 next_track_id = 1
 
@@ -170,9 +167,8 @@ def process_surveillance_frame(image_data_str):
     img_pil = Image.open(io.BytesIO(base64.b64decode(image_data_str))).convert('RGB')
     img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
     
-    # 🚀 FIX 1: INCREASE CONFIDENCE & ADD NMS (iou)
-    # conf=0.65 kills the background noise. iou=0.4 stops overlapping boxes. max_det=40 limits the AI from crashing.
-    results = yolo_model(img_cv, conf=0.65, iou=0.4, max_det=40, verbose=False)
+    # YOLO finds bodies/heads
+    results = yolo_model(img_cv, conf=0.30, classes=[0], verbose=False)
     
     MATCH_THRESHOLD = 0.65 
     detected_students =[]
@@ -188,23 +184,14 @@ def process_surveillance_frame(image_data_str):
             box_width = x2 - x1
             box_height = y2 - y1
 
-            # 🚀 FIX 2: GEOMETRIC SANITY CHECKS
-            # 1. Size Check: Ignore anything smaller than 35x35 pixels (kills tiny shadows)
-            if box_width < 35 or box_height < 35: 
-                continue
-            
-            # 2. Aspect Ratio: Faces are vertical rectangles. 
-            # If width is more than 1.2x the height, it's a cabinet/shirt fold. Kill it.
-            aspect_ratio = float(box_width) / float(box_height)
-            if aspect_ratio < 0.5 or aspect_ratio > 1.2:
-                continue
+            if box_width < 20 or box_height < 20: continue
 
             cx = x1 + (box_width // 2)
             cy = y1 + (box_height // 2)
 
             best_track_id = None
             min_dist = float('inf')
-            dist_threshold = max(box_width * 1.5, 100)
+            dist_threshold = max(box_width * 1.5, 150)
 
             for tid, tdata in live_tracker_memory.items():
                 prev_cx, prev_cy = tdata["center"]
@@ -225,17 +212,17 @@ def process_surveillance_frame(image_data_str):
                 if scans_this_frame < MAX_SCANS_PER_FRAME:
                     scans_this_frame += 1
                     
-                    pad_x = int(box_width * 0.1)
-                    pad_y = int(box_height * 0.1)
-                    px1, py1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-                    px2, py2 = min(img_pil.width, x2 + pad_x), min(img_pil.height, y2 + pad_y)
+                    pad = 10
+                    px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
+                    px2, py2 = min(img_pil.width, x2 + pad), min(img_pil.height, y2 + pad)
                     
-                    face_crop = img_pil.crop((px1, py1, px2, py2))
+                    person_crop = img_pil.crop((px1, py1, px2, py2))
                     
-                    try:
-                        face_tensor = face_preprocess(face_crop).unsqueeze(0).to(device)
-                        live_embedding = resnet(face_tensor).detach().cpu().numpy()[0]
-                        
+                    # 🔥 MTCNN guarantees we extract pure face DNA, not the background/shirt!
+                    face_tensor = mtcnn(person_crop)
+                    
+                    if face_tensor is not None:
+                        live_embedding = resnet(face_tensor.unsqueeze(0).to(device)).detach().cpu().numpy()[0]
                         best_match_name = "Unknown"
                         best_match_id = None
                         best_match_score = -1.0 
@@ -250,6 +237,7 @@ def process_surveillance_frame(image_data_str):
                                     
                         if best_match_score > MATCH_THRESHOLD:
                             confidence_val = best_match_score * 100
+                            # Smart Active Learning
                             if 80.0 < confidence_val < 96.0 and len(global_face_db[best_match_id]["embeddings"]) < 20:
                                 global_face_db[best_match_id]["embeddings"].append(live_embedding.tolist())
                                 save_required = True
@@ -257,7 +245,8 @@ def process_surveillance_frame(image_data_str):
                             person_data = {"name": best_match_name, "student_id": best_match_id, "status": "known", "center": (cx, cy)}
                         else:
                             person_data = {"name": "Unknown", "student_id": None, "status": "unknown", "center": (cx, cy)}
-                    except Exception as e:
+                    else:
+                        # MTCNN couldn't find a face in the YOLO box (person looking away)
                         person_data = {"name": "Unknown", "student_id": None, "status": "unknown", "center": (cx, cy)}
                         
                     current_frame_tracks[best_track_id] = person_data
@@ -288,6 +277,7 @@ async def websocket_surveillance(websocket: WebSocket):
     except WebSocketDisconnect:
         print("Live Surveillance Disconnected")
 
+# --- 5. FALLBACK POST ENDPOINT & QUICK ENROLL ---
 class SweepPayload(BaseModel):
     image: str
     class_nbr: str
@@ -313,12 +303,12 @@ def quick_enroll(payload: QuickEnrollPayload):
     img_pil = Image.open(io.BytesIO(base64.b64decode(b64_str))).convert('RGB')
     
     x, y, w, h = payload.box
-    pad_x, pad_y = int(w * 0.1), int(h * 0.1)
-    crop_img = img_pil.crop((max(0, x-pad_x), max(0, y-pad_y), min(img_pil.width, x+w+pad_x), min(img_pil.height, y+h+pad_y)))
+    crop_img = img_pil.crop((max(0, x), max(0, y), min(img_pil.width, x+w), min(img_pil.height, y+h)))
     
     try:
-        face_tensor = face_preprocess(crop_img).unsqueeze(0).to(device)
-        embedding = resnet(face_tensor).detach().cpu().numpy()[0].tolist()
+        face_tensor = mtcnn(crop_img)
+        if face_tensor is None: raise ValueError("MTCNN failed on crop")
+        embedding = resnet(face_tensor.unsqueeze(0).to(device)).detach().cpu().numpy()[0].tolist()
         
         if payload.student_id not in global_face_db:
             global_face_db[payload.student_id] = {"name": payload.student_name, "embeddings":[]}
@@ -333,6 +323,7 @@ def quick_enroll(payload: QuickEnrollPayload):
     except Exception as e:
         raise HTTPException(status_code=400, detail="Could not extract biometric DNA. Please try again.")
 
+# --- 6. EXPORT ATTENDANCE TO EXCEL ---
 class AttendanceExportPayload(BaseModel):
     class_nbr: int
     attendance_records: Dict[str, str]
