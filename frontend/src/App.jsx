@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect } from 'react';
 import Webcam from "react-webcam";
 import './App.css';
 
-// Using HTTP for normal stuff, and WS for live streaming
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
@@ -17,7 +16,7 @@ function App() {
 
   // --- WEBCAM ENROLLMENT STATE ---
   const[isModalOpen, setIsModalOpen] = useState(false);
-  const[enrollStep, setEnrollStep] = useState(''); 
+  const [enrollStep, setEnrollStep] = useState(''); 
   const [capturedImages, setCapturedImages] = useState({});
   const[isCapturing, setIsCapturing] = useState(false); 
   const webcamRef = useRef(null);
@@ -33,11 +32,8 @@ function App() {
   const[detectedFaces, setDetectedFaces] = useState([]);
   const [quickEnrollData, setQuickEnrollData] = useState(null); 
   const canvasRef = useRef(null);
-  
-  // NEW: WebSocket reference
   const wsRef = useRef(null);
 
-  // 1. Handle Login
   const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
@@ -47,9 +43,7 @@ function App() {
       const data = await res.json();
       setFacultyName(data.name);
       fetchClasses(email);
-    } catch (err) {
-      setError(err.message);
-    }
+    } catch (err) { setError(err.message); }
   };
 
   const fetchClasses = async (userEmail) => {
@@ -59,9 +53,7 @@ function App() {
       setClasses(data);
       setView('classes'); 
       stopSurveillance(); 
-    } catch (err) {
-      alert("Error loading classes");
-    }
+    } catch (err) { alert("Error loading classes"); }
   };
 
   const fetchStudents = async (classNbr) => {
@@ -72,11 +64,10 @@ function App() {
       setSelectedClass(classNbr);
       setAttendanceRecords({}); 
       setView('students');
-    } catch (err) {
-      alert("Error loading students");
-    }
+    } catch (err) { alert("Error loading students"); }
   };
-  
+
+  // --- NEW: DOWNLOAD EXCEL REPORT LOGIC ---
   const downloadAttendanceReport = async () => {
     try {
       const response = await fetch(`${API_BASE}/export-attendance`, {
@@ -90,7 +81,6 @@ function App() {
 
       if (!response.ok) throw new Error("Failed to generate report");
 
-      // Convert the response to a downloadable Blob
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -146,18 +136,34 @@ function App() {
     }
   };
 
-  const runVerificationScan = async () => { /* Kept as is */ };
+  const runVerificationScan = async () => {
+    setVerifyResult('Scanning...');
+    const imageSrc = webcamRef.current.getScreenshot();
+    try {
+      const response = await fetch(`${API_BASE}/verify-face`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: imageSrc }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail);
+      
+      if (result.match && result.name === verifyingStudent['Student Name']) {
+        setVerifyResult(`✅ Identity Verified: ${result.name}`);
+        setAttendanceRecords(prev => ({ ...prev,[verifyingStudent['Student ID']]: 'present' }));
+        setTimeout(() => { setIsVerifyModalOpen(false); }, 1500);
+      } else if (result.match) {
+        setVerifyResult(`❌ Mismatch! That face belongs to: ${result.name}`);
+        setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
+      } else {
+        setVerifyResult(`❌ Face Not Recognized in Database.`);
+        setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
+      }
+    } catch (error) { setVerifyResult(`⚠️ Error: ${error.message}`); }
+  };
 
-  // --- NEW: WEBSOCKET SURVEILLANCE LOGIC ---
-  // --- NEW: WEBSOCKET SURVEILLANCE LOGIC ---
   const sendFrameToWebSocket = () => {
-    // FIX: Only rely on Refs, never on React State variables here!
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && webcamRef.current) {
       const imageSrc = webcamRef.current.getScreenshot();
       if (imageSrc) {
         wsRef.current.send(JSON.stringify({ image: imageSrc }));
       } else {
-        // If webcam is still warming up, try again next frame
         requestAnimationFrame(sendFrameToWebSocket);
       }
     }
@@ -168,57 +174,39 @@ function App() {
       stopSurveillance();
     } else {
       setIsSurveillanceActive(true);
-      
-      // Connect to the WebSocket Endpoint
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
       
       wsRef.current.onopen = () => {
         console.log("WebSocket Connected!");
-        sendFrameToWebSocket(); // Send the very first frame
+        sendFrameToWebSocket(); 
       };
 
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.status === 'success') {
           setDetectedFaces(data.faces);
-          
-          // Mark attendance
           const newRecords = {};
           data.faces.forEach(face => {
             if (face.status === 'known' && face.student_id) newRecords[face.student_id] = 'present';
           });
           setAttendanceRecords(prev => ({ ...prev, ...newRecords }));
         }
-        
-        // THE FIX: Instead of checking 'isSurveillanceActive', we just check if the socket is open.
-        // This completely prevents the React "Stale Closure" bug!
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           requestAnimationFrame(sendFrameToWebSocket);
         }
       };
-
-      wsRef.current.onerror = (error) => {
-        console.error("WebSocket error", error);
-        stopSurveillance();
-      };
+      wsRef.current.onerror = (error) => { stopSurveillance(); };
     }
   };
 
   const stopSurveillance = () => {
     setIsSurveillanceActive(false);
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     setDetectedFaces([]);
   };
 
-  // Cleanup WebSocket on unmount
-  useEffect(() => {
-    return () => stopSurveillance();
-  },[]);
+  useEffect(() => { return () => stopSurveillance(); },[]);
 
-  // DRAW GREEN/RED BOXES ON CANVAS
   useEffect(() => {
     if (canvasRef.current && webcamRef.current && webcamRef.current.video) {
       const video = webcamRef.current.video;
@@ -245,7 +233,7 @@ function App() {
         ctx.fillText(text, x + 10, y - 8);
       });
     }
-  }, [detectedFaces]);
+  },[detectedFaces]);
 
   const handleCanvasClick = (e) => {
     const canvas = canvasRef.current;
@@ -279,19 +267,15 @@ function App() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
-      
       alert(`✅ ${result.message}`);
       setQuickEnrollData(null); 
-    } catch (error) {
-      alert(`❌ Quick Enroll Error: ${error.message}`);
-    }
+    } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
 
   const closeModal = () => setIsModalOpen(false);
 
   return (
     <div>
-      {/* ---------------- TOP BAR & NAVBAR ---------------- */}
       <div className="top-bar">
         <div>✉ info@lu.ac.ae &nbsp;&nbsp; 📞 600 500606</div>
         <div className="top-bar-right"><span>Our Campuses</span> <span>LU Connect</span> <span>Library Portal</span><button>Enquire Now</button></div>
@@ -301,7 +285,6 @@ function App() {
         <div className="nav-links"><a>Home</a><a>Study</a><a>Admissions</a><a>Research</a><a>Student Life</a><a>About Us</a></div>
       </nav>
 
-      {/* ---------------- LOGIN VIEW ---------------- */}
       {view === 'login' && (
         <>
           <div className="hero-section">
@@ -333,7 +316,6 @@ function App() {
         </>
       )}
 
-      {/* ---------------- FACULTY DASHBOARD ---------------- */}
       {view === 'classes' && (
         <div className="app-container">
           <div className="content-box">
@@ -367,13 +349,12 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- STUDENT LIST & LIVE SURVEILLANCE ---------------- */}
       {view === 'students' && (
         <div className="app-container">
           <div className="content-box">
             <button className="back-btn" onClick={() => setView('classes')}>← Back to Classes</button>
-            <h2 className="section-title" style={{display: 'block'}}>Class Roster: {selectedClass}</h2>
-            {/* NEW: Title and Download Button side by side */}
+            
+            {/* --- THE EXCEL EXPORT BUTTON IS ADDED HERE! --- */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
               <h2 className="section-title" style={{ display: 'inline-block', margin: 0 }}>Class Roster: {selectedClass}</h2>
               <button 
@@ -384,37 +365,22 @@ function App() {
               </button>
             </div>
             
-            {/* --- LIVE SURVEILLANCE UI --- */}
             <div style={{background: '#f8f9fa', padding: '20px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)'}}>🎥 Live Classroom Surveillance</h3>
               <p style={{color: '#666', fontSize: '14px', marginBottom: '20px'}}>YOLOv8 + PyTorch crowd tracking. <b>Click on Red (Unknown) boxes</b> to Quick Enroll a student!</p>
               
               <div style={{position: 'relative', display: 'inline-block', width: '100%', maxWidth: '800px', margin: '0 auto'}}>
-                <Webcam 
-                  ref={webcamRef} 
-                  audio={false} 
-                  screenshotFormat="image/jpeg" 
-                  style={{ width: '100%', height: 'auto', display: 'block', borderRadius: '8px', border: '3px solid #ccc' }} 
-                  videoConstraints={{ facingMode: "user" }}
-                />
-                <canvas 
-                  ref={canvasRef} 
-                  onClick={handleCanvasClick}
-                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: 'crosshair' }} 
-                />
+                <Webcam ref={webcamRef} audio={false} screenshotFormat="image/jpeg" style={{ width: '100%', height: 'auto', display: 'block', borderRadius: '8px', border: '3px solid #ccc' }} videoConstraints={{ facingMode: "user" }} />
+                <canvas ref={canvasRef} onClick={handleCanvasClick} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: 'crosshair' }} />
               </div>
 
               <div style={{marginTop: '20px'}}>
-                <button 
-                  style={{background: isSurveillanceActive ? '#dc3545' : '#2f3254', color: 'white', padding: '12px 30px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '16px', boxShadow: '0 4px 10px rgba(0,0,0,0.1)'}}
-                  onClick={toggleSurveillance}
-                >
+                <button style={{background: isSurveillanceActive ? '#dc3545' : '#2f3254', color: 'white', padding: '12px 30px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '16px'}} onClick={toggleSurveillance}>
                   {isSurveillanceActive ? '🛑 Stop Surveillance' : '▶ Start Live Attendance'}
                 </button>
               </div>
             </div>
 
-            {/* --- STUDENT LIST --- */}
             <div style={{maxWidth: '800px', margin: '0 auto'}}>
               <table>
                 <thead>
@@ -455,7 +421,6 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- FOOTER ---------------- */}
       <footer className="site-footer">
         <div className="footer-grid">
           <div><h3 style={{borderBottom: '2px solid #ffcb05', display: 'inline-block', paddingBottom: '5px'}}>🛡️ Liwa University</h3><p style={{color: '#ccc', lineHeight: '1.6'}}>Abu Dhabi Campus<br/>PO Box 41009, Abu Dhabi, UAE</p></div>
@@ -463,7 +428,6 @@ function App() {
         </div>
       </footer>
 
-      {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
       {isModalOpen && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -508,7 +472,6 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- NEW: LIVE CLICK "QUICK ENROLL" MODAL ---------------- */}
       {quickEnrollData && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -522,13 +485,11 @@ function App() {
                 </div>
               ))}
             </div>
-            <br/>
-            <button className="btn-cancel" onClick={() => setQuickEnrollData(null)}>Cancel</button>
+            <br/><button className="btn-cancel" onClick={() => setQuickEnrollData(null)}>Cancel</button>
           </div>
         </div>
       )}
 
-      {/* ---------------- 1-ON-1 VERIFICATION MODAL ---------------- */}
       {isVerifyModalOpen && verifyingStudent && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -538,9 +499,7 @@ function App() {
               <Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" width="100%" videoConstraints={{ facingMode: "user" }} />
               <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
             </div>
-            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>
-              {verifyResult}
-            </div>
+            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
             <button className="btn-capture" onClick={runVerificationScan}>🔍 Scan Face</button>
             <button className="btn-cancel" onClick={() => setIsVerifyModalOpen(false)}>Close</button>
           </div>
