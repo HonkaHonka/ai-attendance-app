@@ -248,6 +248,21 @@ async def websocket_surveillance(websocket: WebSocket):
     except WebSocketDisconnect:
         print("Live Surveillance Disconnected")
 
+# --- MISSING POST ENDPOINT RESTORED ---
+class SweepPayload(BaseModel):
+    image: str
+    class_nbr: str
+
+@app.post("/api/surveillance-sweep")
+def surveillance_sweep_endpoint(payload: SweepPayload):
+    try:
+        # We pass the image to the Tracker function we built earlier!
+        detected_faces = process_surveillance_frame(payload.image)
+        return {"status": "success", "faces": detected_faces}
+    except Exception as e:
+        print(f"Sweep Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 class QuickEnrollPayload(BaseModel):
     student_id: str
