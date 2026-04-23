@@ -9,7 +9,7 @@ import numpy as np
 import pickle
 import torch
 from facenet_pytorch import InceptionResnetV1
-from torchvision import transforms # NEW: Replaces MTCNN's resizing job
+from torchvision import transforms 
 from PIL import Image
 import io
 import cv2
@@ -35,7 +35,6 @@ device = torch.device('cpu')
 print(f"🚀 AI MODELS WILL RUN ON: {device.type.upper()}")
 print("="*50 + "\n")
 
-# 🔥 MTCNN IS GONE! We replace it with lightning-fast standard PyTorch transforms
 face_preprocess = transforms.Compose([
     transforms.Resize((160, 160)),
     transforms.ToTensor(),
@@ -45,9 +44,8 @@ face_preprocess = transforms.Compose([
 print("Loading InceptionResnetV1 (CPU)...")
 resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device) 
 
-# 🔥 LOAD THE NEW YOLO-FACE MODEL 
 print("Loading YOLOv8-Face...")
-yolo_model = YOLO('yolov8n-face_openvino_model/') # Change to openvino folder later for the TV!
+yolo_model = YOLO('yolov8n_openvino_model/', task='detect')
 print("✅ ALL CPU AI MODELS ARE READY!")
 
 DATA_FILE = "data/KHC_REGISTERED_STUDENTS_31560.xlsx"
@@ -77,7 +75,6 @@ try:
     df = df.fillna("")
 except Exception as e: df = pd.DataFrame()
 
-# --- BASIC API ENDPOINTS (No changes here) ---
 @app.get("/api/login")
 def login(email: str):
     user_exists = df[df['Faculty Email'].astype(str).str.lower() == email.lower()]
@@ -95,8 +92,6 @@ def get_students(email: str, class_nbr: int):
     class_data = df[(df['Faculty Email'].astype(str).str.lower() == email.lower()) & (df['Class Nbr'] == class_nbr)]
     return class_data[['Student ID', 'Student Name']].to_dict(orient="records")
 
-
-# --- ENROLL ENDPOINT UPDATED (No MTCNN) ---
 class EnrollPayload(BaseModel):
     student_id: str
     student_name: str
@@ -113,7 +108,6 @@ def enroll_face(payload: EnrollPayload):
                 if ',' in b64_str: b64_str = b64_str.split(',')[1]
                 img = Image.open(io.BytesIO(base64.b64decode(b64_str))).convert('RGB')
                 
-                # Use YOLO-Face to find the bounding box exactly
                 res = yolo_model(img, verbose=False)
                 if len(res[0].boxes) > 0:
                     x1, y1, x2, y2 = map(int, res[0].boxes.xyxy[0].tolist())
@@ -130,67 +124,73 @@ def enroll_face(payload: EnrollPayload):
     return {"status": "success", "message": f"Successfully memorized {payload.student_name}"}
 
 
-# 🔥 TRACKER MEMORY (Remembers Who is Who in the Live Stream)
-live_tracker_memory = {} # { track_id: {"name": "John", "student_id": "123", "status": "known"} }
+# 🔥 CUSTOM SPATIAL TRACKER MEMORY
+live_tracker_memory = {} 
+next_track_id = 1
 
 def process_surveillance_frame(image_data_str):
-    global live_tracker_memory
+    global live_tracker_memory, next_track_id
     save_required = False
     
     if ',' in image_data_str: image_data_str = image_data_str.split(',')[1]
     img_pil = Image.open(io.BytesIO(base64.b64decode(image_data_str))).convert('RGB')
     img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
     
-    # 🔥 FIX 1: Add classes=[0] to strictly ignore chairs, desks, walls, etc.
-    results = yolo_model.track(
-        img_cv, 
-        persist=True, 
-        tracker="botsort.yaml", 
-        conf=0.6, 
-        iou=0.4, 
-        classes=[0], # 👈 CRITICAL ADDITION
-        verbose=False
-    )
+    # 🚀 FIX 1: LOWERED CONFIDENCE TO 0.30 TO CATCH FACES EASILY
+    results = yolo_model(img_cv, conf=0.30, classes=[0], verbose=False)
     
     MATCH_THRESHOLD = 0.65 
     detected_students =[]
-
     MAX_SCANS_PER_FRAME = 3
     scans_this_frame = 0
 
-    if results[0].boxes is not None and results[0].boxes.id is not None:
-        boxes = results[0].boxes.xyxy.cpu().numpy()
-        track_ids = results[0].boxes.id.cpu().numpy()
-        confs = results[0].boxes.conf.cpu().numpy() # 🔥 Extract confidences manually
+    current_frame_tracks = {} 
 
-        # 🔥 FIX 2: Zip confidences into the loop
-        for box, track_id, conf in zip(boxes, track_ids, confs):
-            
-            # 🔥 FIX 3: Manually enforce confidence (Tracker sometimes bypasses the conf=0.6 flag)
-            if conf < 0.6:
-                continue
-                
-            track_id = int(track_id)
+    if results[0].boxes is not None and len(results[0].boxes) > 0:
+        boxes = results[0].boxes.xyxy.cpu().numpy()
+
+        for box in boxes:
             x1, y1, x2, y2 = map(int, box)
-            
-            # 🔥 FIX 4: Size Sanity Check. If a box is ridiculously large (e.g., > 60% of the screen), ignore it!
             box_width = x2 - x1
             box_height = y2 - y1
-            if box_width > (img_pil.width * 0.6) or box_height > (img_pil.height * 0.6):
-                continue # Skip this box, it's a glitch tracking the wall/room
-            
-            # Pad the bounding box slightly to get the full head
-            pad = 10
-            x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
-            x2, y2 = min(img_pil.width, x2 + pad), min(img_pil.height, y2 + pad)
 
-            if track_id in live_tracker_memory and live_tracker_memory[track_id]["status"] != "scanning":
-                person_data = live_tracker_memory[track_id]
+            # 🚀 FIX 2: REMOVED THE STRICT ASPECT RATIO FILTER.
+            # We only filter out absolute microscopic dots (less than 20 pixels)
+            if box_width < 20 or box_height < 20:
+                continue
+
+            cx = x1 + (box_width // 2)
+            cy = y1 + (box_height // 2)
+
+            best_track_id = None
+            min_dist = float('inf')
+            dist_threshold = max(box_width * 1.5, 150)
+
+            for tid, tdata in live_tracker_memory.items():
+                prev_cx, prev_cy = tdata["center"]
+                dist = ((cx - prev_cx)**2 + (cy - prev_cy)**2) ** 0.5
+                
+                if dist < dist_threshold and dist < min_dist:
+                    min_dist = dist
+                    best_track_id = tid
+
+            if best_track_id is not None and live_tracker_memory[best_track_id]["status"] != "scanning":
+                person_data = live_tracker_memory[best_track_id]
+                person_data["center"] = (cx, cy) 
+                current_frame_tracks[best_track_id] = person_data
             else:
+                if best_track_id is None:
+                    best_track_id = next_track_id
+                    next_track_id += 1
+
                 if scans_this_frame < MAX_SCANS_PER_FRAME:
                     scans_this_frame += 1
                     
-                    person_crop = img_pil.crop((x1, y1, x2, y2))
+                    pad = 10
+                    px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
+                    px2, py2 = min(img_pil.width, x2 + pad), min(img_pil.height, y2 + pad)
+                    
+                    person_crop = img_pil.crop((px1, py1, px2, py2))
                     face_tensor = face_preprocess(person_crop).unsqueeze(0).to(device)
                     live_embedding = resnet(face_tensor).detach().cpu().numpy()[0]
                     
@@ -212,14 +212,14 @@ def process_surveillance_frame(image_data_str):
                             global_face_db[best_match_id]["embeddings"].append(live_embedding.tolist())
                             save_required = True
                             
-                        person_data = {"name": best_match_name, "student_id": best_match_id, "status": "known"}
+                        person_data = {"name": best_match_name, "student_id": best_match_id, "status": "known", "center": (cx, cy)}
                     else:
-                        person_data = {"name": "Unknown", "student_id": None, "status": "unknown"}
+                        person_data = {"name": "Unknown", "student_id": None, "status": "unknown", "center": (cx, cy)}
                         
-                    live_tracker_memory[track_id] = person_data
+                    current_frame_tracks[best_track_id] = person_data
                 else:
-                    person_data = {"name": "Scanning...", "student_id": None, "status": "scanning"}
-                    live_tracker_memory[track_id] = person_data
+                    person_data = {"name": "Scanning...", "student_id": None, "status": "scanning", "center": (cx, cy)}
+                    current_frame_tracks[best_track_id] = person_data
 
             detected_students.append({
                 "name": person_data["name"], 
@@ -227,6 +227,8 @@ def process_surveillance_frame(image_data_str):
                 "box":[x1, y1, box_width, box_height], 
                 "status": person_data["status"]
             })
+
+    live_tracker_memory = current_frame_tracks
 
     if save_required: save_memory()
     return detected_students
@@ -236,7 +238,7 @@ def process_surveillance_frame(image_data_str):
 async def websocket_surveillance(websocket: WebSocket):
     await websocket.accept()
     global live_tracker_memory
-    live_tracker_memory.clear() # Clear tracker memory when starting fresh
+    live_tracker_memory.clear() 
     try:
         while True:
             data = await websocket.receive_json()
@@ -263,7 +265,6 @@ def quick_enroll(payload: QuickEnrollPayload):
     crop_img = img_pil.crop((max(0, x), max(0, y), min(img_pil.width, x+w), min(img_pil.height, y+h)))
     
     try:
-        # Replaced MTCNN with direct Preprocess
         face_tensor = face_preprocess(crop_img).unsqueeze(0).to(device)
         embedding = resnet(face_tensor).detach().cpu().numpy()[0].tolist()
         
@@ -273,7 +274,6 @@ def quick_enroll(payload: QuickEnrollPayload):
         global_face_db[payload.student_id]["embeddings"].append(embedding)
         save_memory() 
         
-        # Clear tracker memory so the Live Stream instantly rescans this face and turns it green!
         global live_tracker_memory
         live_tracker_memory.clear()
 
@@ -281,41 +281,32 @@ def quick_enroll(payload: QuickEnrollPayload):
     except Exception as e:
         raise HTTPException(status_code=400, detail="Could not extract biometric DNA. Please try again.")
 
-# --- 10. NEW: EXPORT ATTENDANCE TO EXCEL ---
+# --- 10. EXPORT ATTENDANCE TO EXCEL ---
 class AttendanceExportPayload(BaseModel):
     class_nbr: int
     attendance_records: Dict[str, str]
 
 @app.post("/api/export-attendance")
 def export_attendance(payload: AttendanceExportPayload):
-    # 1. Get the original list of students for this class from our Excel DB
     class_data = df[df['Class Nbr'] == payload.class_nbr].copy()
-    if class_data.empty:
-        raise HTTPException(status_code=404, detail="Class not found.")
+    if class_data.empty: raise HTTPException(status_code=404, detail="Class not found.")
     
-    # 2. Add the live attendance status to the dataframe
     def get_status(student_id):
-        # Check the dictionary sent from React. If not present, default to "Absent"
         status = payload.attendance_records.get(str(student_id), "absent")
         return "Present" if status == "present" else "Absent"
         
     class_data['Attendance Status'] = class_data['Student ID'].apply(get_status)
     
-    # Optional: Keep only the columns the teacher actually cares about for the report
     report_columns =['Student ID', 'Student Name', 'Course Name', 'Start Time', 'Attendance Status']
     available_cols =[c for c in report_columns if c in class_data.columns]
     report_df = class_data[available_cols]
 
-    # 3. Create the Excel file in memory (RAM) so we don't clutter the hard drive
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         report_df.to_excel(writer, index=False, sheet_name='Attendance Report')
     output.seek(0)
     
-    # 4. Stream it back to the browser as a downloadable attachment
-    headers = {
-        'Content-Disposition': f'attachment; filename="Attendance_Class_{payload.class_nbr}.xlsx"'
-    }
+    headers = { 'Content-Disposition': f'attachment; filename="Attendance_Class_{payload.class_nbr}.xlsx"' }
     return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')        
 
 if os.path.exists("frontend/dist"): app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="spa")
