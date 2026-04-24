@@ -8,26 +8,23 @@ const WS_BASE = "ws://127.0.0.1:8000/ws";
 function App() {
   const[view, setView] = useState('login'); 
   const [email, setEmail] = useState('');
-  const [facultyName, setFacultyName] = useState('');
+  const[facultyName, setFacultyName] = useState('');
   const [classes, setClasses] = useState([]);
-  const [students, setStudents] = useState([]);
+  const[students, setStudents] = useState([]);
   const [selectedClass, setSelectedClass] = useState('');
-  const [error, setError] = useState('');
+  const[error, setError] = useState('');
 
-  // --- WEBCAM ENROLLMENT STATE ---
   const[isModalOpen, setIsModalOpen] = useState(false);
-  const [enrollStep, setEnrollStep] = useState(''); 
+  const[enrollStep, setEnrollStep] = useState(''); 
   const [capturedImages, setCapturedImages] = useState({});
   const[isCapturing, setIsCapturing] = useState(false); 
   const webcamRef = useRef(null);
 
-  // --- VERIFICATION & ATTENDANCE STATE ---
   const[isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
   const [verifyResult, setVerifyResult] = useState('');
   const[verifyingStudent, setVerifyingStudent] = useState(null); 
   const[attendanceRecords, setAttendanceRecords] = useState({}); 
 
-  // --- LIVE SURVEILLANCE & QUICK ENROLL STATE ---
   const[isSurveillanceActive, setIsSurveillanceActive] = useState(false);
   const[detectedFaces, setDetectedFaces] = useState([]);
   const [quickEnrollData, setQuickEnrollData] = useState(null); 
@@ -67,18 +64,13 @@ function App() {
     } catch (err) { alert("Error loading students"); }
   };
 
-  // --- NEW: DOWNLOAD EXCEL REPORT LOGIC ---
   const downloadAttendanceReport = async () => {
     try {
       const response = await fetch(`${API_BASE}/export-attendance`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          class_nbr: Number(selectedClass),
-          attendance_records: attendanceRecords
-        })
+        body: JSON.stringify({ class_nbr: Number(selectedClass), attendance_records: attendanceRecords })
       });
-
       if (!response.ok) throw new Error("Failed to generate report");
 
       const blob = await response.blob();
@@ -90,9 +82,7 @@ function App() {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
-    } catch (error) {
-      alert(`Error downloading report: ${error.message}`);
-    }
+    } catch (error) { alert(`Error downloading report: ${error.message}`); }
   };
 
   const startEnrollment = async (classNbr) => {
@@ -183,18 +173,24 @@ function App() {
 
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        if (data.status === 'success') {
+        
+        // 🚀 FIX 1: We check if 'data.faces' exists (since the new backend dropped 'status: success')
+        if (data.faces) {
           setDetectedFaces(data.faces);
+          
           const newRecords = {};
           data.faces.forEach(face => {
-            if (face.status === 'known' && face.student_id) newRecords[face.student_id] = 'present';
+            // 🚀 FIX 2: Instead of looking for status='known', we just check if we have a student_id!
+            if (face.student_id) newRecords[face.student_id] = 'present';
           });
           setAttendanceRecords(prev => ({ ...prev, ...newRecords }));
         }
+        
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           requestAnimationFrame(sendFrameToWebSocket);
         }
       };
+
       wsRef.current.onerror = (error) => { stopSurveillance(); };
     }
   };
@@ -220,8 +216,12 @@ function App() {
         const[x, y, w, h] = face.box;
         ctx.beginPath();
         ctx.lineWidth = 4;
-        if (face.status === 'known') { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
+        
+        // 🚀 FIX 3: Dynamic colors based on the Name property, not the missing status property
+        const isUnknown = face.name === "Unknown";
+        if (!isUnknown) { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
         else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
+        
         ctx.rect(x, y, w, h);
         ctx.stroke();
 
@@ -233,7 +233,7 @@ function App() {
         ctx.fillText(text, x + 10, y - 8);
       });
     }
-  },[detectedFaces]);
+  }, [detectedFaces]);
 
   const handleCanvasClick = (e) => {
     const canvas = canvasRef.current;
@@ -246,7 +246,8 @@ function App() {
 
     detectedFaces.forEach(face => {
       const[x, y, w, h] = face.box;
-      if (face.status === 'unknown' && clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
+      // Check if it's unknown
+      if (face.name === 'Unknown' && clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
         const frame = webcamRef.current.getScreenshot();
         setQuickEnrollData({ image: frame, box: face.box });
       }
@@ -255,7 +256,8 @@ function App() {
 
   const assignQuickEnroll = async (studentId, studentName) => {
     try {
-      const response = await fetch(`${API_BASE}/quick-enroll`, {
+      // 🚀 FIX 4: Updated endpoint to match the new python backend ('/api/assign-face')
+      const response = await fetch(`${API_BASE}/assign-face`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -267,7 +269,7 @@ function App() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
-      alert(`✅ ${result.message}`);
+      alert(`✅ Successfully Enrolled!`);
       setQuickEnrollData(null); 
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
@@ -354,7 +356,6 @@ function App() {
           <div className="content-box">
             <button className="back-btn" onClick={() => setView('classes')}>← Back to Classes</button>
             
-            {/* --- THE EXCEL EXPORT BUTTON IS ADDED HERE! --- */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
               <h2 className="section-title" style={{ display: 'inline-block', margin: 0 }}>Class Roster: {selectedClass}</h2>
               <button 
@@ -428,6 +429,7 @@ function App() {
         </div>
       </footer>
 
+      {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
       {isModalOpen && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -472,6 +474,7 @@ function App() {
         </div>
       )}
 
+      {/* ---------------- NEW: LIVE CLICK "QUICK ENROLL" MODAL ---------------- */}
       {quickEnrollData && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -485,11 +488,13 @@ function App() {
                 </div>
               ))}
             </div>
-            <br/><button className="btn-cancel" onClick={() => setQuickEnrollData(null)}>Cancel</button>
+            <br/>
+            <button className="btn-cancel" onClick={() => setQuickEnrollData(null)}>Cancel</button>
           </div>
         </div>
       )}
 
+      {/* ---------------- 1-ON-1 VERIFICATION MODAL ---------------- */}
       {isVerifyModalOpen && verifyingStudent && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -499,7 +504,9 @@ function App() {
               <Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" width="100%" videoConstraints={{ facingMode: "user" }} />
               <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
             </div>
-            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
+            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>
+              {verifyResult}
+            </div>
             <button className="btn-capture" onClick={runVerificationScan}>🔍 Scan Face</button>
             <button className="btn-cancel" onClick={() => setIsVerifyModalOpen(false)}>Close</button>
           </div>
