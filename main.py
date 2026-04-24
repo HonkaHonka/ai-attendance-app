@@ -143,7 +143,9 @@ def process_frame(image_b64):
 
     orig_h, orig_w = frame_bgr.shape[:2]
 
-    # Downscale for detection
+    # -------------------------------------------------
+    # 1) Downscale for detection (TV stable)
+    # -------------------------------------------------
     DET_W, DET_H = 1280, 720
     det_bgr = cv2.resize(frame_bgr, (DET_W, DET_H))
     sx, sy = orig_w / DET_W, orig_h / DET_H
@@ -167,46 +169,91 @@ def process_frame(image_b64):
                 continue
 
             conf = float(boxes.conf[i])
-            if conf < 0.30:
+
+            # -------------------------------------------------
+            # 2) VERY PERMISSIVE threshold for *tracking*
+            # -------------------------------------------------
+            if conf < 0.25:
                 continue
 
             dx1, dy1, dx2, dy2 = map(int, boxes.xyxy[i])
-            x1, y1, x2, y2 = int(dx1*sx), int(dy1*sy), int(dx2*sx), int(dy2*sy)
+            x1, y1 = int(dx1 * sx), int(dy1 * sy)
+            x2, y2 = int(dx2 * sx), int(dy2 * sy)
 
-            bw, bh = x2-x1, y2-y1
-            if bw < orig_w*0.04 or bh < orig_h*0.10:
+            bw, bh = x2 - x1, y2 - y1
+
+            # -------------------------------------------------
+            # 3) Allow small boxes for tracking (side seated)
+            # -------------------------------------------------
+            MIN_TRACK_W = orig_w * 0.025   # ~2.5% width
+            MIN_TRACK_H = orig_h * 0.06    # ~6% height
+
+            if bw < MIN_TRACK_W or bh < MIN_TRACK_H:
                 continue
 
             track_id = int(boxes.id[i])
 
+            # -------------------------------------------------
+            # 4) Temporal locking (NO drift)
+            # -------------------------------------------------
             if track_id in track_state:
                 px1, py1, px2, py2 = track_state[track_id]["box"]
-                move = abs(x1-px1)+abs(y1-py1)
+                move = abs(x1 - px1) + abs(y1 - py1)
+
+                # Freeze if unstable or low-confidence update
                 if conf < 0.45 or move < 30:
                     x1, y1, x2, y2 = px1, py1, px2, py2
 
+            # -------------------------------------------------
+            # 5) Camera-aware face ROI (side-profile friendly)
+            # -------------------------------------------------
+            bw, bh = x2 - x1, y2 - y1
+
             face_h = int(bh * 0.32)
             face_w = int(bw * 0.75)
-            fx1 = x1 + (bw - face_w)//2
+
+            fx1 = x1 + (bw - face_w) // 2
             fx2 = fx1 + face_w
             fy1 = y1 + int(bh * 0.04)
             fy2 = fy1 + face_h
 
+            # -------------------------------------------------
+            # 6) Strict gate for *recognition*, not tracking
+            # -------------------------------------------------
+            face_pixel_h = fy2 - fy1
+            face_pixel_w = fx2 - fx1
+
+            MIN_FACE_H = orig_h * 0.05   # ~5% of frame height
+            MIN_FACE_W = orig_w * 0.03   # ~3% of frame width
+
+            # Ensure track always exists
             if track_id not in track_state:
+                track_state[track_id] = {
+                    "student_id": None,
+                    "name": "Unknown",
+                    "box": (x1, y1, x2, y2)
+                }
+
+            # Only recognize when face is good enough
+            if (
+                track_state[track_id]["student_id"] is None and
+                face_pixel_h >= MIN_FACE_H and
+                face_pixel_w >= MIN_FACE_W
+            ):
                 face_crop = img.crop((fx1, fy1, fx2, fy2))
                 emb = extract_embedding(face_crop)
                 sid, name = recognize_face(emb)
-                track_state[track_id] = {
-                    "student_id": sid,
-                    "name": name,
-                    "box": (x1, y1, x2, y2)
-                }
-            else:
-                track_state[track_id]["box"] = (x1, y1, x2, y2)
+
+                track_state[track_id]["student_id"] = sid
+                track_state[track_id]["name"] = name
+
+            # Update box state
+            track_state[track_id]["box"] = (x1, y1, x2, y2)
 
             person = track_state[track_id]
+
             faces_out.append({
-                "box": [fx1, fy1, fx2-fx1, fy2-fy1],
+                "box": [fx1, fy1, fx2 - fx1, fy2 - fy1],
                 "student_id": person["student_id"],
                 "name": person["name"]
             })
