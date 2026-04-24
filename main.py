@@ -195,7 +195,24 @@ def process_frame(image_b64):
             fx1 = x1
             fx2 = x2
             fy1 = y1
-            fy2 = y1 + int((y2 - y1) * 0.4)
+            
+            box_h = y2 - y1
+            box_w = x2 - x1
+
+            # ✅ face height ≈ 35% of body height
+            face_h = int(box_h * 0.35)
+
+            # ✅ face width ≈ 60% of body width (centered)
+            face_w = int(box_w * 0.6)
+
+            # ✅ center horizontally
+            fx1 = x1 + (box_w - face_w) // 2
+            fx2 = fx1 + face_w
+
+            # ✅ anchor to top with small margin
+            fy1 = y1 + int(box_h * 0.05)
+            fy2 = fy1 + face_h
+
 
             # Recognition only once per track
             if track_id not in track_state:
