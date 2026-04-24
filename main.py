@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from typing import Dict
 import pandas as pd
 import uvicorn
 import os
@@ -62,12 +63,50 @@ face_db = load_face_db()
 track_state = {}
 
 # =========================================================
-# UTILITIES
+# LOAD EXCEL
+# =========================================================
+try:
+    df = pd.read_excel(DATA_FILE)
+    df.columns = df.columns.str.strip()
+    df = df.fillna("")
+except Exception as e:
+    print("⚠️ Excel load error:", e)
+    df = pd.DataFrame()
+
+# =========================================================
+# BASIC API ENDPOINTS (RESTORED ✅)
+# =========================================================
+@app.get("/api/login")
+def login(email: str):
+    user = df[df["Faculty Email"].astype(str).str.lower() == email.lower()]
+    if user.empty:
+        raise HTTPException(status_code=404, detail="Faculty email not found")
+    return {
+        "status": "success",
+        "email": email,
+        "name": user.iloc[0]["Faculty Name"]
+    }
+
+@app.get("/api/classes")
+def get_classes(email: str):
+    faculty = df[df["Faculty Email"].astype(str).str.lower() == email.lower()]
+    return faculty.drop_duplicates(subset=["Class Nbr"]).to_dict("records")
+
+@app.get("/api/students")
+def get_students(email: str, class_nbr: int):
+    class_df = df[
+        (df["Faculty Email"].astype(str).str.lower() == email.lower()) &
+        (df["Class Nbr"] == class_nbr)
+    ]
+    return class_df[["Student ID", "Student Name"]].to_dict("records")
+
+# =========================================================
+# FACE RECOGNITION UTILS
 # =========================================================
 def cosine_similarity(a, b):
     a = np.array(a)
     b = np.array(b)
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 def extract_embedding(face_img: Image.Image):
     face_img = face_img.resize((160, 160))
@@ -92,7 +131,7 @@ def recognize_face(embedding, threshold=0.65):
     return None, "Unknown"
 
 # =========================================================
-# LIVE SURVEILLANCE CORE (TV SAFE)
+# LIVE SURVEILLANCE CORE (TV‑SAFE)
 # =========================================================
 def process_frame(image_b64):
     if "," in image_b64:
@@ -104,7 +143,7 @@ def process_frame(image_b64):
 
     orig_h, orig_w = frame_bgr.shape[:2]
 
-    # ✅ Detect at stable resolution
+    # Downscale for detection
     DET_W, DET_H = 1280, 720
     det_bgr = cv2.resize(frame_bgr, (DET_W, DET_H))
     sx, sy = orig_w / DET_W, orig_h / DET_H
@@ -134,22 +173,18 @@ def process_frame(image_b64):
             dx1, dy1, dx2, dy2 = map(int, boxes.xyxy[i])
             x1, y1, x2, y2 = int(dx1*sx), int(dy1*sy), int(dx2*sx), int(dy2*sy)
 
-            bw, bh = x2 - x1, y2 - y1
-
-            # ✅ HARD physical limits
+            bw, bh = x2-x1, y2-y1
             if bw < orig_w*0.04 or bh < orig_h*0.10:
                 continue
 
             track_id = int(boxes.id[i])
 
-            # ✅ Temporal locking
             if track_id in track_state:
                 px1, py1, px2, py2 = track_state[track_id]["box"]
-                move = abs(x1-px1) + abs(y1-py1)
+                move = abs(x1-px1)+abs(y1-py1)
                 if conf < 0.45 or move < 30:
                     x1, y1, x2, y2 = px1, py1, px2, py2
 
-            # ✅ Camera-aware face ROI (profile safe)
             face_h = int(bh * 0.32)
             face_w = int(bw * 0.75)
             fx1 = x1 + (bw - face_w)//2
@@ -157,7 +192,6 @@ def process_frame(image_b64):
             fy1 = y1 + int(bh * 0.04)
             fy2 = fy1 + face_h
 
-            # ✅ Recognition once
             if track_id not in track_state:
                 face_crop = img.crop((fx1, fy1, fx2, fy2))
                 emb = extract_embedding(face_crop)
@@ -172,7 +206,7 @@ def process_frame(image_b64):
 
             person = track_state[track_id]
             faces_out.append({
-                "box": [fx1, fy1, fx2 - fx1, fy2 - fy1],
+                "box": [fx1, fy1, fx2-fx1, fy2-fy1],
                 "student_id": person["student_id"],
                 "name": person["name"]
             })
@@ -193,6 +227,12 @@ async def ws_surveillance(ws: WebSocket):
             await ws.send_json({"faces": faces})
     except WebSocketDisconnect:
         track_state.clear()
+
+# =========================================================
+# FRONTEND (STATIC)
+# =========================================================
+if os.path.exists("frontend/dist"):
+    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
 
 # =========================================================
 # RUN
