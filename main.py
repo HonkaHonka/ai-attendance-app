@@ -11,9 +11,9 @@ import pickle
 import torch
 from PIL import Image
 import io
-import asyncio
-from ultralytics import YOLO
 import cv2
+from ultralytics import YOLO
+
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -33,7 +33,7 @@ print(f"✅ RUNNING ON {device}")
 # =========================================================
 # MODELS
 # =========================================================
-print("🔹 Loading YOLOv8n (PERSON TRACKING)...")
+print("🔹 Loading YOLOv8n OpenVINO (PERSON TRACKING)...")
 yolo_person = YOLO("yolov8n_openvino_model/", task="detect")
 
 print("🔹 Loading Face Embedding Model...")
@@ -59,63 +59,27 @@ def save_face_db(db):
         pickle.dump(db, f)
 
 face_db = load_face_db()
+track_state = {}
 
+# =========================================================
+# UTILITIES
+# =========================================================
 def cosine_similarity(a, b):
     a = np.array(a)
     b = np.array(b)
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-# =========================================================
-# LOAD EXCEL
-# =========================================================
-try:
-    df = pd.read_excel(DATA_FILE)
-    df.columns = df.columns.str.strip()
-    df = df.fillna("")
-except:
-    df = pd.DataFrame()
-
-# =========================================================
-# BASIC API
-# =========================================================
-@app.get("/api/login")
-def login(email: str):
-    user = df[df["Faculty Email"].str.lower() == email.lower()]
-    if user.empty:
-        raise HTTPException(404, "Faculty not found")
-    return {"status": "success", "name": user.iloc[0]["Faculty Name"]}
-
-@app.get("/api/classes")
-def classes(email: str):
-    faculty = df[df["Faculty Email"].str.lower() == email.lower()]
-    return faculty.drop_duplicates(subset=["Class Nbr"]).to_dict("records")
-
-@app.get("/api/students")
-def students(email: str, class_nbr: int):
-    class_df = df[
-        (df["Faculty Email"].str.lower() == email.lower()) &
-        (df["Class Nbr"] == class_nbr)
-    ]
-    return class_df[["Student ID", "Student Name"]].to_dict("records")
-
-# =========================================================
-# LIVE SURVEILLANCE CORE (PERSON-BASED)
-# =========================================================
-track_state = {}  # track_id -> info
-RECOGNITION_THRESHOLD = 0.65
-
 def extract_embedding(face_img: Image.Image):
     face_img = face_img.resize((160, 160))
     arr = np.asarray(face_img).astype(np.float32) / 255.0
-    tensor = torch.tensor(arr).permute(2, 0, 1).unsqueeze(0).to(device)
+    t = torch.tensor(arr).permute(2, 0, 1).unsqueeze(0).to(device)
     with torch.no_grad():
-        return face_net(tensor).cpu().numpy()[0]
+        return face_net(t).cpu().numpy()[0]
 
-def recognize_face(embedding):
+def recognize_face(embedding, threshold=0.65):
     best_score = -1
     best_id = None
     best_name = "Unknown"
-
     for sid, data in face_db.items():
         for saved in data["embeddings"]:
             sim = cosine_similarity(embedding, saved)
@@ -123,33 +87,31 @@ def recognize_face(embedding):
                 best_score = sim
                 best_id = sid
                 best_name = data["name"]
-
-    if best_score >= RECOGNITION_THRESHOLD:
+    if best_score >= threshold:
         return best_id, best_name
     return None, "Unknown"
 
+# =========================================================
+# LIVE SURVEILLANCE CORE (TV SAFE)
+# =========================================================
 def process_frame(image_b64):
     if "," in image_b64:
         image_b64 = image_b64.split(",")[1]
 
-    # Original image (full resolution)
     img = Image.open(io.BytesIO(base64.b64decode(image_b64))).convert("RGB")
     frame_rgb = np.array(img)
     frame_bgr = frame_rgb[:, :, ::-1]
 
     orig_h, orig_w = frame_bgr.shape[:2]
 
-    # ✅ 1. DOWNSCALE FOR DETECTION (CRITICAL FOR TV)
+    # ✅ Detect at stable resolution
     DET_W, DET_H = 1280, 720
-    resize_bgr = cv2.resize(frame_bgr, (DET_W, DET_H))
+    det_bgr = cv2.resize(frame_bgr, (DET_W, DET_H))
+    sx, sy = orig_w / DET_W, orig_h / DET_H
 
-    scale_x = orig_w / DET_W
-    scale_y = orig_h / DET_H
-
-    # ✅ 2. RUN YOLO (DETECTION-ANCHORED TRACKING)
     results = yolo_person.track(
-        resize_bgr,
-        conf=0.45,                  # stricter for TV
+        det_bgr,
+        conf=0.40,
         classes=[0],
         tracker="bytetrack.yaml",
         persist=True,
@@ -160,66 +122,46 @@ def process_frame(image_b64):
 
     if results and results[0].boxes is not None:
         boxes = results[0].boxes
-        print("DETECTIONS:", len(boxes), "IDS:", boxes.id)
 
         for i in range(len(boxes)):
             if boxes.id is None:
                 continue
 
             conf = float(boxes.conf[i])
+            if conf < 0.30:
+                continue
 
-            # ✅ 3. IGNORE TRACKER-ONLY PREDICTIONS
-            if conf < 0.45:
+            dx1, dy1, dx2, dy2 = map(int, boxes.xyxy[i])
+            x1, y1, x2, y2 = int(dx1*sx), int(dy1*sy), int(dx2*sx), int(dy2*sy)
+
+            bw, bh = x2 - x1, y2 - y1
+
+            # ✅ HARD physical limits
+            if bw < orig_w*0.04 or bh < orig_h*0.10:
                 continue
 
             track_id = int(boxes.id[i])
 
-            # Detection box (scaled coordinates)
-            dx1, dy1, dx2, dy2 = map(int, boxes.xyxy[i])
-
-            # ✅ Map back to original resolution
-            x1 = int(dx1 * scale_x)
-            y1 = int(dy1 * scale_y)
-            x2 = int(dx2 * scale_x)
-            y2 = int(dy2 * scale_y)
-
-            # ✅ 4. TEMPORAL POSITION LOCK
+            # ✅ Temporal locking
             if track_id in track_state:
                 px1, py1, px2, py2 = track_state[track_id]["box"]
-                move = abs(x1 - px1) + abs(y1 - py1)
-
-                if move < 25:  # standing still → freeze position
+                move = abs(x1-px1) + abs(y1-py1)
+                if conf < 0.45 or move < 30:
                     x1, y1, x2, y2 = px1, py1, px2, py2
 
-            # ✅ face ROI = upper 40%
-            fx1 = x1
-            fx2 = x2
-            fy1 = y1
-            
-            box_h = y2 - y1
-            box_w = x2 - x1
-
-            # ✅ face height ≈ 35% of body height
-            face_h = int(box_h * 0.35)
-
-            # ✅ face width ≈ 60% of body width (centered)
-            face_w = int(box_w * 0.6)
-
-            # ✅ center horizontally
-            fx1 = x1 + (box_w - face_w) // 2
+            # ✅ Camera-aware face ROI (profile safe)
+            face_h = int(bh * 0.32)
+            face_w = int(bw * 0.75)
+            fx1 = x1 + (bw - face_w)//2
             fx2 = fx1 + face_w
-
-            # ✅ anchor to top with small margin
-            fy1 = y1 + int(box_h * 0.05)
+            fy1 = y1 + int(bh * 0.04)
             fy2 = fy1 + face_h
 
-
-            # Recognition only once per track
+            # ✅ Recognition once
             if track_id not in track_state:
                 face_crop = img.crop((fx1, fy1, fx2, fy2))
-                embedding = extract_embedding(face_crop)
-                sid, name = recognize_face(embedding)
-
+                emb = extract_embedding(face_crop)
+                sid, name = recognize_face(emb)
                 track_state[track_id] = {
                     "student_id": sid,
                     "name": name,
@@ -229,7 +171,6 @@ def process_frame(image_b64):
                 track_state[track_id]["box"] = (x1, y1, x2, y2)
 
             person = track_state[track_id]
-
             faces_out.append({
                 "box": [fx1, fy1, fx2 - fx1, fy2 - fy1],
                 "student_id": person["student_id"],
@@ -238,8 +179,6 @@ def process_frame(image_b64):
 
     return faces_out
 
-
-
 # =========================================================
 # WEBSOCKET
 # =========================================================
@@ -247,54 +186,13 @@ def process_frame(image_b64):
 async def ws_surveillance(ws: WebSocket):
     await ws.accept()
     track_state.clear()
-
     try:
         while True:
             data = await ws.receive_json()
-            image_b64 = data["image"]
-
-            # 🔴 DO NOT USE asyncio.to_thread HERE
-            faces = process_frame(image_b64)
-
+            faces = process_frame(data["image"])
             await ws.send_json({"faces": faces})
     except WebSocketDisconnect:
         track_state.clear()
-
-
-# =========================================================
-# QUICK ASSIGN (TEACHER CLICK)
-# =========================================================
-class AssignPayload(BaseModel):
-    student_id: str
-    student_name: str
-    image: str
-    box: list
-
-@app.post("/api/assign-face")
-def assign_face(p: AssignPayload):
-    if "," in p.image:
-        p.image = p.image.split(",")[1]
-
-    img = Image.open(io.BytesIO(base64.b64decode(p.image))).convert("RGB")
-    x, y, w, h = p.box
-    face = img.crop((x, y, x + w, y + h))
-
-    emb = extract_embedding(face)
-
-    if p.student_id not in face_db:
-        face_db[p.student_id] = {"name": p.student_name, "embeddings": []}
-
-    face_db[p.student_id]["embeddings"].append(emb.tolist())
-    save_face_db(face_db)
-
-    track_state.clear()
-    return {"status": "success"}
-
-# =========================================================
-# FRONTEND
-# =========================================================
-if os.path.exists("frontend/dist"):
-    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
 
 # =========================================================
 # RUN
