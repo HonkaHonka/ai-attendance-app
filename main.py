@@ -152,18 +152,29 @@ def process_frame(image_b64):
         boxes = results[0].boxes
         print("DETECTIONS:", len(boxes), "IDS:", boxes.id)
 
+        
         for i in range(len(boxes)):
             if boxes.id is None:
                 continue
 
+            # ✅ NEW: read detection confidence
+            conf = float(boxes.conf[i])
+
+            # ✅ IMPORTANT: ignore low‑confidence (tracker‑only) boxes
+            if conf < 0.45:
+                continue
+
             track_id = int(boxes.id[i])
+
+            # ✅ only now do we trust the box coordinates
             x1, y1, x2, y2 = map(int, boxes.xyxy[i])
 
-            # face ROI = top 40%
+            # ✅ face ROI = upper 40% of the person box
             fx1 = x1
             fx2 = x2
             fy1 = y1
             fy2 = y1 + int((y2 - y1) * 0.4)
+
 
             if track_id not in track_state:
                 face_crop = img.crop((fx1, fy1, fx2, fy2))
