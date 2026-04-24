@@ -13,7 +13,7 @@ from PIL import Image
 import io
 import asyncio
 from ultralytics import YOLO
-
+import cv2
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -132,16 +132,26 @@ def process_frame(image_b64):
     if "," in image_b64:
         image_b64 = image_b64.split(",")[1]
 
+    # Original image (full resolution)
     img = Image.open(io.BytesIO(base64.b64decode(image_b64))).convert("RGB")
-
     frame_rgb = np.array(img)
     frame_bgr = frame_rgb[:, :, ::-1]
 
+    orig_h, orig_w = frame_bgr.shape[:2]
+
+    # ✅ 1. DOWNSCALE FOR DETECTION (CRITICAL FOR TV)
+    DET_W, DET_H = 1280, 720
+    resize_bgr = cv2.resize(frame_bgr, (DET_W, DET_H))
+
+    scale_x = orig_w / DET_W
+    scale_y = orig_h / DET_H
+
+    # ✅ 2. RUN YOLO (DETECTION-ANCHORED TRACKING)
     results = yolo_person.track(
-        frame_bgr,
-        conf=0.4,
-        classes=[0],                 # person only
-        tracker="bytetrack.yaml",    # ✅ REQUIRED
+        resize_bgr,
+        conf=0.45,                  # stricter for TV
+        classes=[0],
+        tracker="bytetrack.yaml",
         persist=True,
         verbose=False
     )
@@ -152,30 +162,42 @@ def process_frame(image_b64):
         boxes = results[0].boxes
         print("DETECTIONS:", len(boxes), "IDS:", boxes.id)
 
-        
         for i in range(len(boxes)):
             if boxes.id is None:
                 continue
 
-            # ✅ NEW: read detection confidence
             conf = float(boxes.conf[i])
 
-            # ✅ IMPORTANT: ignore low‑confidence (tracker‑only) boxes
+            # ✅ 3. IGNORE TRACKER-ONLY PREDICTIONS
             if conf < 0.45:
                 continue
 
             track_id = int(boxes.id[i])
 
-            # ✅ only now do we trust the box coordinates
-            x1, y1, x2, y2 = map(int, boxes.xyxy[i])
+            # Detection box (scaled coordinates)
+            dx1, dy1, dx2, dy2 = map(int, boxes.xyxy[i])
 
-            # ✅ face ROI = upper 40% of the person box
+            # ✅ Map back to original resolution
+            x1 = int(dx1 * scale_x)
+            y1 = int(dy1 * scale_y)
+            x2 = int(dx2 * scale_x)
+            y2 = int(dy2 * scale_y)
+
+            # ✅ 4. TEMPORAL POSITION LOCK
+            if track_id in track_state:
+                px1, py1, px2, py2 = track_state[track_id]["box"]
+                move = abs(x1 - px1) + abs(y1 - py1)
+
+                if move < 25:  # standing still → freeze position
+                    x1, y1, x2, y2 = px1, py1, px2, py2
+
+            # ✅ face ROI = upper 40%
             fx1 = x1
             fx2 = x2
             fy1 = y1
             fy2 = y1 + int((y2 - y1) * 0.4)
 
-
+            # Recognition only once per track
             if track_id not in track_state:
                 face_crop = img.crop((fx1, fy1, fx2, fy2))
                 embedding = extract_embedding(face_crop)
@@ -183,8 +205,11 @@ def process_frame(image_b64):
 
                 track_state[track_id] = {
                     "student_id": sid,
-                    "name": name
+                    "name": name,
+                    "box": (x1, y1, x2, y2)
                 }
+            else:
+                track_state[track_id]["box"] = (x1, y1, x2, y2)
 
             person = track_state[track_id]
 
