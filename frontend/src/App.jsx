@@ -13,16 +13,16 @@ const VIDEO_CONSTRAINTS = {
 
 function App() {
   const[view, setView] = useState('login'); 
-  const [email, setEmail] = useState('');
+  const[email, setEmail] = useState('');
   const[facultyName, setFacultyName] = useState('');
-  const [classes, setClasses] = useState([]);
+  const[classes, setClasses] = useState([]);
   const[students, setStudents] = useState([]);
   const [selectedClass, setSelectedClass] = useState('');
   const[error, setError] = useState('');
 
   const[isModalOpen, setIsModalOpen] = useState(false);
   const[enrollStep, setEnrollStep] = useState(''); 
-  const [capturedImages, setCapturedImages] = useState({});
+  const[capturedImages, setCapturedImages] = useState({});
   const[isCapturing, setIsCapturing] = useState(false); 
   
   const[isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
@@ -37,14 +37,14 @@ function App() {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
-  const surveillanceWebcamRef = useRef(null); // Dedicated ref for the fullscreen webcam
+  const surveillanceWebcamRef = useRef(null); 
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
     try {
       const res = await fetch(`${API_BASE}/login?email=${encodeURIComponent(email)}`);
-      if (!res.ok) throw new Error("Faculty email not found or Server is offline.");
+      if (!res.ok) throw new Error("Faculty email not found.");
       const data = await res.json();
       setFacultyName(data.name);
       fetchClasses(email);
@@ -80,7 +80,6 @@ function App() {
         body: JSON.stringify({ class_nbr: Number(selectedClass), attendance_records: attendanceRecords })
       });
       if (!response.ok) throw new Error("Failed to generate report");
-
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -93,7 +92,6 @@ function App() {
     } catch (error) { alert(`Error downloading report: ${error.message}`); }
   };
 
-  // --- STANDARD ENROLLMENT ---
   const startEnrollment = async (classNbr) => {
     setSelectedClass(classNbr);
     setCapturedImages({});
@@ -101,8 +99,7 @@ function App() {
     setIsModalOpen(true); 
     try {
       const res = await fetch(`${API_BASE}/students?email=${encodeURIComponent(email)}&class_nbr=${classNbr}`);
-      const data = await res.json();
-      setStudents(data);
+      setStudents(await res.json());
     } catch (err) {}
   };
 
@@ -135,7 +132,6 @@ function App() {
     }
   };
 
-  // --- 1-ON-1 VERIFY ---
   const runVerificationScan = async () => {
     setVerifyResult('Scanning...');
     const imageSrc = webcamRef.current.getScreenshot();
@@ -158,7 +154,6 @@ function App() {
     } catch (error) { setVerifyResult(`⚠️ Error: ${error.message}`); }
   };
 
-  // --- FULL SCREEN LIVE SURVEILLANCE ---
   const sendFrameToWebSocket = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && surveillanceWebcamRef.current) {
       const imageSrc = surveillanceWebcamRef.current.getScreenshot();
@@ -176,12 +171,7 @@ function App() {
     } else {
       setIsSurveillanceActive(true);
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
-      
-      wsRef.current.onopen = () => {
-        console.log("WebSocket Connected!");
-        sendFrameToWebSocket(); 
-      };
-
+      wsRef.current.onopen = () => { sendFrameToWebSocket(); };
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.faces) {
@@ -196,8 +186,7 @@ function App() {
           requestAnimationFrame(sendFrameToWebSocket);
         }
       };
-
-      wsRef.current.onerror = (error) => { stopSurveillance(); };
+      wsRef.current.onerror = () => { stopSurveillance(); };
     }
   };
 
@@ -267,7 +256,7 @@ function App() {
     detectedFaces.forEach(face => {
       const[origX, origY, origW, origH] = face.box;
       
-      // Allow clicking on both Unknown (Red) AND Scanning (Yellow) boxes!
+      // 🚀 FIX: Allow clicks on both Unknown AND Scanning boxes!
       if ((face.status === 'unknown' || face.status === 'scanning') && 
           clickX >= origX && clickX <= origX + origW && 
           clickY >= origY && clickY <= origY + origH) {
@@ -303,14 +292,13 @@ function App() {
     <div>
       <div className="top-bar">
         <div>✉ info@lu.ac.ae &nbsp;&nbsp; 📞 600 500606</div>
-        <div className="top-bar-right"><span>Our Campuses</span> <span>LU Connect</span> <span>Library Portal</span><button>Enquire Now</button></div>
+        <div className="top-bar-right"><span>Our Campuses</span> <span>LU Connect</span> <span>Library Portal</span></div>
       </div>
       <nav className="main-nav">
         <div className="logo">🛡️ Liwa <span>University</span></div>
         <div className="nav-links"><a>Home</a><a>Study</a><a>Admissions</a><a>Research</a><a>Student Life</a><a>About Us</a></div>
       </nav>
 
-      {/* ---------------- LOGIN VIEW ---------------- */}
       {view === 'login' && (
         <>
           <div className="hero-section">
@@ -326,16 +314,19 @@ function App() {
               </form>
             </div>
           </div>
+          <div className="stats-bar">
+            <div className="stat-item"><div className="stat-icon">🏛️</div><div className="stat-text"><h4>Liwa University</h4><p>Licensed by the MOHESR in UAE</p></div></div>
+            <div className="stat-item"><div className="stat-icon">🎓</div><div className="stat-text"><h4>Graduate & Undergraduate</h4><p>35 Programs Available</p></div></div>
+            <div className="stat-item"><div className="stat-icon">📍</div><div className="stat-text"><h4>Campuses in</h4><p>Abu Dhabi and Al Ain</p></div></div>
+          </div>
         </>
       )}
 
-      {/* ---------------- FACULTY DASHBOARD ---------------- */}
       {view === 'classes' && (
         <div className="app-container">
           <div className="content-box">
             <h2 className="section-title">Faculty Dashboard</h2>
             <h3 style={{color: '#555', marginTop: 0}}>Welcome, {facultyName}</h3>
-            <p>Select an action below to manage student enrollment and attendance.</p>
             <div style={{overflowX: 'auto'}}>
               <table>
                 <thead>
@@ -363,7 +354,6 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- STUDENT LIST & LIVE SURVEILLANCE BUTTON ---------------- */}
       {view === 'students' && (
         <div className="app-container">
           <div className="content-box">
@@ -379,7 +369,7 @@ function App() {
               </button>
             </div>
             
-            {/* BIG START SURVEILLANCE BANNER */}
+            {/* 🚀 FIX: Removed the small inline webcam. We only have the Big Launch Banner now! */}
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
               <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>
@@ -447,7 +437,6 @@ function App() {
           </div>
 
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
-            {/* 🚀 FIX: PERFECT 16:9 CONTAINER FOR NO DISTORTION */}
             <div style={{ position: 'relative', aspectRatio: '16/9', maxHeight: '100%', maxWidth: '100%' }}>
               <Webcam 
                 ref={surveillanceWebcamRef} 
@@ -469,7 +458,7 @@ function App() {
 
       {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
       {isModalOpen && (
-        <div className="modal-overlay">
+        <div className="modal-overlay" style={{zIndex: 4000}}>
           <div className="modal-content">
             <h2 className="modal-header">Biometric Enrollment</h2>
             {(enrollStep === 'front' || enrollStep === 'left' || enrollStep === 'right') && (
@@ -514,7 +503,7 @@ function App() {
 
       {/* ---------------- QUICK ENROLL MODAL ---------------- */}
       {quickEnrollData && (
-        <div className="modal-overlay" style={{zIndex: 4000}}>
+        <div className="modal-overlay" style={{zIndex: 5000}}>
           <div className="modal-content">
             <h2 className="modal-header">⚡ Quick Live Enrollment</h2>
             <p>Select the name of the student you just clicked:</p>
@@ -533,7 +522,7 @@ function App() {
 
       {/* ---------------- 1-ON-1 VERIFICATION MODAL ---------------- */}
       {isVerifyModalOpen && verifyingStudent && (
-        <div className="modal-overlay">
+        <div className="modal-overlay" style={{zIndex: 4000}}>
           <div className="modal-content">
             <h2 className="modal-header">Verify Identity</h2>
             <h3 style={{marginTop: 0, color: '#555'}}>Target Student: {verifyingStudent['Student Name']}</h3>
@@ -547,6 +536,13 @@ function App() {
           </div>
         </div>
       )}
+
+      <footer className="site-footer">
+        <div className="footer-grid">
+          <div><h3 style={{borderBottom: '2px solid #ffcb05', display: 'inline-block', paddingBottom: '5px'}}>🛡️ Liwa University</h3><p style={{color: '#ccc', lineHeight: '1.6'}}>Abu Dhabi Campus<br/>PO Box 41009, Abu Dhabi, UAE</p></div>
+          <div><h3>Contact us</h3><ul style={{color: '#ccc'}}><li>Call Center: 600 500606</li><li>E-mail: info@lu.ac.ae</li></ul></div>
+        </div>
+      </footer>
 
     </div>
   );
