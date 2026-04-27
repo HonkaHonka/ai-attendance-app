@@ -17,12 +17,12 @@ function App() {
   const[facultyName, setFacultyName] = useState('');
   const[classes, setClasses] = useState([]);
   const[students, setStudents] = useState([]);
-  const [selectedClass, setSelectedClass] = useState('');
+  const[selectedClass, setSelectedClass] = useState('');
   const[error, setError] = useState('');
 
   const[isModalOpen, setIsModalOpen] = useState(false);
   const[enrollStep, setEnrollStep] = useState(''); 
-  const[capturedImages, setCapturedImages] = useState({});
+  const [capturedImages, setCapturedImages] = useState({});
   const[isCapturing, setIsCapturing] = useState(false); 
   
   const[isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
@@ -38,13 +38,14 @@ function App() {
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
+  const zoomCanvasRef = useRef(null); // Reference for the new Zoom Canvas
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
     try {
       const res = await fetch(`${API_BASE}/login?email=${encodeURIComponent(email)}`);
-      if (!res.ok) throw new Error("Faculty email not found.");
+      if (!res.ok) throw new Error("Faculty email not found or Server is offline.");
       const data = await res.json();
       setFacultyName(data.name);
       fetchClasses(email);
@@ -80,6 +81,7 @@ function App() {
         body: JSON.stringify({ class_nbr: Number(selectedClass), attendance_records: attendanceRecords })
       });
       if (!response.ok) throw new Error("Failed to generate report");
+
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -186,7 +188,7 @@ function App() {
           requestAnimationFrame(sendFrameToWebSocket);
         }
       };
-      wsRef.current.onerror = () => { stopSurveillance(); };
+      wsRef.current.onerror = (error) => { stopSurveillance(); };
     }
   };
 
@@ -246,7 +248,6 @@ function App() {
     
     const rect = canvas.getBoundingClientRect();
     const video = surveillanceWebcamRef.current.video;
-    
     const scaleX = video.videoWidth / rect.width;
     const scaleY = video.videoHeight / rect.height;
     
@@ -256,16 +257,41 @@ function App() {
     detectedFaces.forEach(face => {
       const[origX, origY, origW, origH] = face.box;
       
-      // 🚀 FIX: Allow clicks on both Unknown AND Scanning boxes!
       if ((face.status === 'unknown' || face.status === 'scanning') && 
           clickX >= origX && clickX <= origX + origW && 
           clickY >= origY && clickY <= origY + origH) {
         
+        // 🚀 THE FIX: We capture the frame, STOP the live feed, and open the Zoom Modal!
         const frame = surveillanceWebcamRef.current.getScreenshot();
         setQuickEnrollData({ image: frame, box: face.box });
+        stopSurveillance(); // Pauses the background chaos while the teacher assigns the name
       }
     });
   };
+
+  // 🚀 NEW: This effect handles drawing the "Digital Zoom" on the popup canvas
+  useEffect(() => {
+    if (quickEnrollData && zoomCanvasRef.current) {
+      const img = new Image();
+      img.onload = () => {
+        const ctx = zoomCanvasRef.current.getContext('2d');
+        const [x, y, w, h] = quickEnrollData.box;
+        
+        // We calculate a slightly padded box to zoom in on
+        const padX = w * 0.2;
+        const padY = h * 0.2;
+        const sx = Math.max(0, x - padX);
+        const sy = Math.max(0, y - padY);
+        const sw = Math.min(img.width - sx, w + (padX * 2));
+        const sh = Math.min(img.height - sy, h + (padY * 2));
+
+        // Draw it massive on the new 400x400 canvas
+        ctx.clearRect(0, 0, 400, 400);
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 400, 400);
+      };
+      img.src = quickEnrollData.image;
+    }
+  }, [quickEnrollData]);
 
   const assignQuickEnroll = async (studentId, studentName) => {
     try {
@@ -281,8 +307,11 @@ function App() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
+      
       alert(`✅ Successfully Enrolled!`);
       setQuickEnrollData(null); 
+      toggleSurveillance(); // 🚀 Restart the live feed instantly after saving!
+      
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
 
@@ -319,6 +348,14 @@ function App() {
             <div className="stat-item"><div className="stat-icon">🎓</div><div className="stat-text"><h4>Graduate & Undergraduate</h4><p>35 Programs Available</p></div></div>
             <div className="stat-item"><div className="stat-icon">📍</div><div className="stat-text"><h4>Campuses in</h4><p>Abu Dhabi and Al Ain</p></div></div>
           </div>
+          <div className="about-section">
+            <div className="about-logo-placeholder">🛡️</div>
+            <div className="about-content">
+              <h2>About Liwa University</h2>
+              <p>Since 1993, Liwa University has been a cornerstone of higher education in the Emirate of Abu Dhabi...</p>
+              <button className="btn-primary" style={{width: '200px', marginTop: '10px'}}>Read More</button>
+            </div>
+          </div>
         </>
       )}
 
@@ -327,6 +364,7 @@ function App() {
           <div className="content-box">
             <h2 className="section-title">Faculty Dashboard</h2>
             <h3 style={{color: '#555', marginTop: 0}}>Welcome, {facultyName}</h3>
+            <p>Select an action below to manage student enrollment and attendance.</p>
             <div style={{overflowX: 'auto'}}>
               <table>
                 <thead>
@@ -369,7 +407,6 @@ function App() {
               </button>
             </div>
             
-            {/* 🚀 FIX: Removed the small inline webcam. We only have the Big Launch Banner now! */}
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
               <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>
@@ -423,7 +460,7 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- NEW: FULL-SCREEN SURVEILLANCE OVERLAY ---------------- */}
+      {/* ---------------- FULL-SCREEN SURVEILLANCE OVERLAY ---------------- */}
       {isSurveillanceActive && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column' }}>
           
@@ -456,9 +493,52 @@ function App() {
         </div>
       )}
 
+      {/* ---------------- NEW: TARGET LOCKED INVESTIGATION ZOOM UI ---------------- */}
+      {quickEnrollData && (
+        <div className="modal-overlay" style={{zIndex: 5000, backdropFilter: 'blur(10px)'}}>
+          <div className="modal-content" style={{maxWidth: '850px', display: 'flex', gap: '30px', alignItems: 'flex-start', background: '#1e1e2d', color: 'white', border: '2px solid #3e426b'}}>
+            
+            {/* LEFT: The High-Res Zoomed In View */}
+            <div style={{flex: 1, textAlign: 'center'}}>
+              <h3 style={{color: 'var(--accent-gold)', marginTop: 0}}>🎯 Target Locked</h3>
+              <canvas 
+                ref={zoomCanvasRef} 
+                width="400" height="400" 
+                style={{borderRadius: '12px', border: '4px solid var(--accent-gold)', objectFit: 'cover', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', width: '100%'}} 
+              />
+              <p style={{color: '#aaa', fontSize: '14px', marginTop: '15px'}}>Clicking assign will extract biometric DNA from this specific crop.</p>
+            </div>
+
+            {/* RIGHT: Name Selection Panel */}
+            <div style={{flex: 1, textAlign: 'left'}}>
+              <h2 className="modal-header" style={{marginTop: 0, borderBottomColor: '#444'}}>⚡ Quick Enroll</h2>
+              <p style={{color: '#ccc'}}>Who is this student?</p>
+              
+              <div className="student-select-list" style={{maxHeight: '350px', border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c'}}>
+                {students.map((student, idx) => (
+                  <div key={idx} className="student-select-item" style={{borderBottomColor: '#444', color: 'white'}} onClick={() => assignQuickEnroll(student['Student ID'], student['Student Name'])}>
+                    <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
+                    <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
+                  </div>
+                ))}
+              </div>
+              
+              <br/>
+              <button className="btn-cancel" style={{width: '100%'}} onClick={() => {
+                setQuickEnrollData(null);
+                toggleSurveillance(); // 🚀 Resumes the live feed if they cancel!
+              }}>
+                Cancel & Resume Tracking
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
       {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
       {isModalOpen && (
-        <div className="modal-overlay" style={{zIndex: 4000}}>
+        <div className="modal-overlay">
           <div className="modal-content">
             <h2 className="modal-header">Biometric Enrollment</h2>
             {(enrollStep === 'front' || enrollStep === 'left' || enrollStep === 'right') && (
@@ -501,25 +581,6 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- QUICK ENROLL MODAL ---------------- */}
-      {quickEnrollData && (
-        <div className="modal-overlay" style={{zIndex: 5000}}>
-          <div className="modal-content">
-            <h2 className="modal-header">⚡ Quick Live Enrollment</h2>
-            <p>Select the name of the student you just clicked:</p>
-            <div className="student-select-list">
-              {students.map((student, idx) => (
-                <div key={idx} className="student-select-item" onClick={() => assignQuickEnroll(student['Student ID'], student['Student Name'])}>
-                  <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
-                  <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
-                </div>
-              ))}
-            </div>
-            <br/><button className="btn-cancel" onClick={() => setQuickEnrollData(null)}>Cancel</button>
-          </div>
-        </div>
-      )}
-
       {/* ---------------- 1-ON-1 VERIFICATION MODAL ---------------- */}
       {isVerifyModalOpen && verifyingStudent && (
         <div className="modal-overlay" style={{zIndex: 4000}}>
@@ -536,13 +597,6 @@ function App() {
           </div>
         </div>
       )}
-
-      <footer className="site-footer">
-        <div className="footer-grid">
-          <div><h3 style={{borderBottom: '2px solid #ffcb05', display: 'inline-block', paddingBottom: '5px'}}>🛡️ Liwa University</h3><p style={{color: '#ccc', lineHeight: '1.6'}}>Abu Dhabi Campus<br/>PO Box 41009, Abu Dhabi, UAE</p></div>
-          <div><h3>Contact us</h3><ul style={{color: '#ccc'}}><li>Call Center: 600 500606</li><li>E-mail: info@lu.ac.ae</li></ul></div>
-        </div>
-      </footer>
 
     </div>
   );
