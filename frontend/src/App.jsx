@@ -5,6 +5,14 @@ import './App.css';
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
+// 🚀 FIX 1: Lock all cameras to standard 720p. 
+// This fixes the offset bug and stops the TV from sending 4K images over the WebSocket!
+const VIDEO_CONSTRAINTS = {
+  width: 1280,
+  height: 720,
+  facingMode: "user" 
+};
+
 function App() {
   const[view, setView] = useState('login'); 
   const [email, setEmail] = useState('');
@@ -27,7 +35,7 @@ function App() {
 
   const[isSurveillanceActive, setIsSurveillanceActive] = useState(false);
   const[detectedFaces, setDetectedFaces] = useState([]);
-  const [quickEnrollData, setQuickEnrollData] = useState(null); 
+  const[quickEnrollData, setQuickEnrollData] = useState(null); 
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
 
@@ -140,7 +148,7 @@ function App() {
         setTimeout(() => { setIsVerifyModalOpen(false); }, 1500);
       } else if (result.match) {
         setVerifyResult(`❌ Mismatch! That face belongs to: ${result.name}`);
-        setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
+        setAttendanceRecords(prev => ({ ...prev,[verifyingStudent['Student ID']]: 'failed' }));
       } else {
         setVerifyResult(`❌ Face Not Recognized in Database.`);
         setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
@@ -150,6 +158,7 @@ function App() {
 
   const sendFrameToWebSocket = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && webcamRef.current) {
+      // Because we locked videoConstraints to 720p, this screenshot is fast and perfectly scaled!
       const imageSrc = webcamRef.current.getScreenshot();
       if (imageSrc) {
         wsRef.current.send(JSON.stringify({ image: imageSrc }));
@@ -173,19 +182,14 @@ function App() {
 
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        
-        // 🚀 FIX 1: We check if 'data.faces' exists (since the new backend dropped 'status: success')
         if (data.faces) {
           setDetectedFaces(data.faces);
-          
           const newRecords = {};
           data.faces.forEach(face => {
-            // 🚀 FIX 2: Instead of looking for status='known', we just check if we have a student_id!
             if (face.student_id) newRecords[face.student_id] = 'present';
           });
           setAttendanceRecords(prev => ({ ...prev, ...newRecords }));
         }
-        
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           requestAnimationFrame(sendFrameToWebSocket);
         }
@@ -217,7 +221,6 @@ function App() {
         ctx.beginPath();
         ctx.lineWidth = 4;
         
-        // 🚀 FIX 3: Dynamic colors based on the Name property, not the missing status property
         const isUnknown = face.name === "Unknown";
         if (!isUnknown) { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
         else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
@@ -246,7 +249,6 @@ function App() {
 
     detectedFaces.forEach(face => {
       const[x, y, w, h] = face.box;
-      // Check if it's unknown
       if (face.name === 'Unknown' && clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
         const frame = webcamRef.current.getScreenshot();
         setQuickEnrollData({ image: frame, box: face.box });
@@ -256,7 +258,6 @@ function App() {
 
   const assignQuickEnroll = async (studentId, studentName) => {
     try {
-      // 🚀 FIX 4: Updated endpoint to match the new python backend ('/api/assign-face')
       const response = await fetch(`${API_BASE}/assign-face`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -371,8 +372,19 @@ function App() {
               <p style={{color: '#666', fontSize: '14px', marginBottom: '20px'}}>YOLOv8 + PyTorch crowd tracking. <b>Click on Red (Unknown) boxes</b> to Quick Enroll a student!</p>
               
               <div style={{position: 'relative', display: 'inline-block', width: '100%', maxWidth: '800px', margin: '0 auto'}}>
-                <Webcam ref={webcamRef} audio={false} screenshotFormat="image/jpeg" style={{ width: '100%', height: 'auto', display: 'block', borderRadius: '8px', border: '3px solid #ccc' }} videoConstraints={{ facingMode: "user" }} />
-                <canvas ref={canvasRef} onClick={handleCanvasClick} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: 'crosshair' }} />
+                <Webcam 
+                  ref={webcamRef} 
+                  audio={false} 
+                  mirrored={false} /* 🚀 FIX 2: Prevents horizontal flipping bugs! */
+                  screenshotFormat="image/jpeg" 
+                  style={{ width: '100%', height: 'auto', display: 'block', borderRadius: '8px', border: '3px solid #ccc', objectFit: 'contain' }} 
+                  videoConstraints={VIDEO_CONSTRAINTS} /* Applied 720p lock here! */
+                />
+                <canvas 
+                  ref={canvasRef} 
+                  onClick={handleCanvasClick}
+                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: 'crosshair' }} 
+                />
               </div>
 
               <div style={{marginTop: '20px'}}>
@@ -429,7 +441,7 @@ function App() {
         </div>
       </footer>
 
-      {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
+      {/* ---------------- ENROLLMENT MODAL ---------------- */}
       {isModalOpen && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -438,7 +450,10 @@ function App() {
               <>
                 <p>Please align the student's face within the oval.</p>
                 <div className="webcam-container">
-                  <Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" width="100%" videoConstraints={{ facingMode: "user" }} />
+                  <Webcam 
+                    audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" 
+                    videoConstraints={VIDEO_CONSTRAINTS} 
+                  />
                   <div className="webcam-mask"></div>
                   <div className="webcam-overlay-text">
                     {enrollStep === 'front' && "👤 Look straight into the camera"}
@@ -474,7 +489,7 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- NEW: LIVE CLICK "QUICK ENROLL" MODAL ---------------- */}
+      {/* ---------------- QUICK ENROLL MODAL ---------------- */}
       {quickEnrollData && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -488,8 +503,7 @@ function App() {
                 </div>
               ))}
             </div>
-            <br/>
-            <button className="btn-cancel" onClick={() => setQuickEnrollData(null)}>Cancel</button>
+            <br/><button className="btn-cancel" onClick={() => setQuickEnrollData(null)}>Cancel</button>
           </div>
         </div>
       )}
@@ -501,12 +515,13 @@ function App() {
             <h2 className="modal-header">Verify Identity</h2>
             <h3 style={{marginTop: 0, color: '#555'}}>Target Student: {verifyingStudent['Student Name']}</h3>
             <div className="webcam-container" style={{minHeight: '250px'}}>
-              <Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" width="100%" videoConstraints={{ facingMode: "user" }} />
+              <Webcam 
+                audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" 
+                videoConstraints={VIDEO_CONSTRAINTS} 
+              />
               <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
             </div>
-            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>
-              {verifyResult}
-            </div>
+            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
             <button className="btn-capture" onClick={runVerificationScan}>🔍 Scan Face</button>
             <button className="btn-cancel" onClick={() => setIsVerifyModalOpen(false)}>Close</button>
           </div>
