@@ -270,28 +270,35 @@ function App() {
   };
 
   // 🚀 NEW: This effect handles drawing the "Digital Zoom" on the popup canvas
+  // --- UPGRADED: DIGITAL ZOOM "PORTRAIT" EFFECT ---
   useEffect(() => {
     if (quickEnrollData && zoomCanvasRef.current) {
       const img = new Image();
       img.onload = () => {
         const ctx = zoomCanvasRef.current.getContext('2d');
-        const [x, y, w, h] = quickEnrollData.box;
+        const[x, y, w, h] = quickEnrollData.box;
         
-        // We calculate a slightly padded box to zoom in on
-        const padX = w * 0.2;
-        const padY = h * 0.2;
+        // 🚀 FIX: Instead of a tight face crop, we take a wider "Head & Shoulders" portrait.
+        // This prevents the image from over-stretching and looking heavily pixelated!
+        const padX = w * 0.6; // Take 60% more space on the sides
+        const padY = h * 0.4; // Take 40% more space on top/bottom
+        
         const sx = Math.max(0, x - padX);
         const sy = Math.max(0, y - padY);
         const sw = Math.min(img.width - sx, w + (padX * 2));
-        const sh = Math.min(img.height - sy, h + (padY * 2));
+        const sh = Math.min(img.height - sy, h + (padY * 2)); // Crop down to mid-chest
 
-        // Draw it massive on the new 400x400 canvas
+        // 🚀 FIX: Turn on Canvas High-Quality Anti-Aliasing (Smoothing)
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        // Draw it into the 400x400 circular canvas
         ctx.clearRect(0, 0, 400, 400);
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 400, 400);
       };
       img.src = quickEnrollData.image;
     }
-  }, [quickEnrollData]);
+  },[quickEnrollData]);
 
   const assignQuickEnroll = async (studentId, studentName) => {
     try {
