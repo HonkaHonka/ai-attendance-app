@@ -5,19 +5,13 @@ import './App.css';
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
-const VIDEO_CONSTRAINTS = {
-  width: 1280,
-  height: 720,
-  facingMode: "user" 
-};
-
 function App() {
   const[view, setView] = useState('login'); 
-  const[email, setEmail] = useState('');
+  const [email, setEmail] = useState('');
   const[facultyName, setFacultyName] = useState('');
-  const[classes, setClasses] = useState([]);
+  const [classes, setClasses] = useState([]);
   const[students, setStudents] = useState([]);
-  const[selectedClass, setSelectedClass] = useState('');
+  const [selectedClass, setSelectedClass] = useState('');
   const[error, setError] = useState('');
 
   const[isModalOpen, setIsModalOpen] = useState(false);
@@ -38,7 +32,7 @@ function App() {
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
-  const zoomCanvasRef = useRef(null); // Reference for the new Zoom Canvas
+  const zoomCanvasRef = useRef(null);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -248,6 +242,7 @@ function App() {
     
     const rect = canvas.getBoundingClientRect();
     const video = surveillanceWebcamRef.current.video;
+    
     const scaleX = video.videoWidth / rect.width;
     const scaleY = video.videoHeight / rect.height;
     
@@ -261,44 +256,42 @@ function App() {
           clickX >= origX && clickX <= origX + origW && 
           clickY >= origY && clickY <= origY + origH) {
         
-        // 🚀 THE FIX: We capture the frame, STOP the live feed, and open the Zoom Modal!
         const frame = surveillanceWebcamRef.current.getScreenshot();
         setQuickEnrollData({ image: frame, box: face.box });
-        stopSurveillance(); // Pauses the background chaos while the teacher assigns the name
+        stopSurveillance(); 
       }
     });
   };
 
-  // 🚀 NEW: This effect handles drawing the "Digital Zoom" on the popup canvas
-  // --- UPGRADED: DIGITAL ZOOM "PORTRAIT" EFFECT ---
+  // 🚀 FIX 2: SMART PORTRAIT DIGITAL ZOOM
   useEffect(() => {
     if (quickEnrollData && zoomCanvasRef.current) {
       const img = new Image();
       img.onload = () => {
         const ctx = zoomCanvasRef.current.getContext('2d');
-        const[x, y, w, h] = quickEnrollData.box;
+        const [x, y, w, h] = quickEnrollData.box;
         
-        // 🚀 FIX: Instead of a tight face crop, we take a wider "Head & Shoulders" portrait.
-        // This prevents the image from over-stretching and looking heavily pixelated!
-        const padX = w * 0.6; // Take 60% more space on the sides
-        const padY = h * 0.4; // Take 40% more space on top/bottom
+        // Instead of grabbing the whole body box, we grab a perfect square 
+        // starting at the top of the box based on the shoulder width!
+        // This guarantees a clean headshot whether standing or sitting.
+        const targetSize = w * 1.5; 
         
-        const sx = Math.max(0, x - padX);
-        const sy = Math.max(0, y - padY);
-        const sw = Math.min(img.width - sx, w + (padX * 2));
-        const sh = Math.min(img.height - sy, h + (padY * 2)); // Crop down to mid-chest
+        // Add slight padding to capture the top of the hair
+        const padTop = w * 0.25;
+        
+        const sx = Math.max(0, x - (w * 0.25)); // Center horizontally
+        const sy = Math.max(0, y - padTop);     // Start near top of the YOLO box
+        const sw = targetSize;
+        const sh = targetSize;
 
-        // 🚀 FIX: Turn on Canvas High-Quality Anti-Aliasing (Smoothing)
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
-
-        // Draw it into the 400x400 circular canvas
         ctx.clearRect(0, 0, 400, 400);
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 400, 400);
       };
       img.src = quickEnrollData.image;
     }
-  },[quickEnrollData]);
+  }, [quickEnrollData]);
 
   const assignQuickEnroll = async (studentId, studentName) => {
     try {
@@ -317,7 +310,7 @@ function App() {
       
       alert(`✅ Successfully Enrolled!`);
       setQuickEnrollData(null); 
-      toggleSurveillance(); // 🚀 Restart the live feed instantly after saving!
+      toggleSurveillance(); 
       
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
@@ -335,6 +328,7 @@ function App() {
         <div className="nav-links"><a>Home</a><a>Study</a><a>Admissions</a><a>Research</a><a>Student Life</a><a>About Us</a></div>
       </nav>
 
+      {/* ---------------- LOGIN VIEW ---------------- */}
       {view === 'login' && (
         <>
           <div className="hero-section">
@@ -366,6 +360,7 @@ function App() {
         </>
       )}
 
+      {/* ---------------- FACULTY DASHBOARD ---------------- */}
       {view === 'classes' && (
         <div className="app-container">
           <div className="content-box">
@@ -399,6 +394,7 @@ function App() {
         </div>
       )}
 
+      {/* ---------------- STUDENT LIST & LIVE SURVEILLANCE BUTTON ---------------- */}
       {view === 'students' && (
         <div className="app-container">
           <div className="content-box">
@@ -417,7 +413,7 @@ function App() {
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
               <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>
-                Launch the Full-Screen AI Tracker to automatically mark student attendance.
+                YOLOv8 + PyTorch crowd tracking. <b>Click on Red (Unknown) boxes</b> to Quick Enroll a student!
               </p>
               <button 
                 style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} 
@@ -481,13 +477,13 @@ function App() {
           </div>
 
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
+            {/* NO MORE VIDEO_CONSTRAINTS! The camera can breathe in native 4K! */}
             <div style={{ position: 'relative', aspectRatio: '16/9', maxHeight: '100%', maxWidth: '100%' }}>
               <Webcam 
                 ref={surveillanceWebcamRef} 
                 audio={false} 
                 mirrored={false} 
                 screenshotFormat="image/jpeg" 
-                videoConstraints={VIDEO_CONSTRAINTS} 
                 style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
               />
               <canvas 
@@ -533,7 +529,7 @@ function App() {
               <br/>
               <button className="btn-cancel" style={{width: '100%'}} onClick={() => {
                 setQuickEnrollData(null);
-                toggleSurveillance(); // 🚀 Resumes the live feed if they cancel!
+                toggleSurveillance(); 
               }}>
                 Cancel & Resume Tracking
               </button>
@@ -552,7 +548,7 @@ function App() {
               <>
                 <p>Please align the student's face within the oval.</p>
                 <div className="webcam-container">
-                  <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={VIDEO_CONSTRAINTS} />
+                  <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" />
                   <div className="webcam-mask"></div>
                   <div className="webcam-overlay-text">
                     {enrollStep === 'front' && "👤 Look straight into the camera"}
@@ -595,7 +591,7 @@ function App() {
             <h2 className="modal-header">Verify Identity</h2>
             <h3 style={{marginTop: 0, color: '#555'}}>Target Student: {verifyingStudent['Student Name']}</h3>
             <div className="webcam-container" style={{minHeight: '250px'}}>
-              <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={VIDEO_CONSTRAINTS} />
+              <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" />
               <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
             </div>
             <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
