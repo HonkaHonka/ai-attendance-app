@@ -127,13 +127,11 @@ def process_frame(image_b64):
     frame_rgb = np.array(img)
     frame_bgr = frame_rgb[:, :, ::-1]
 
-    # 🚀 FIX 1: Use BotSORT. It tracks perfectly and avoids the OpenVINO ByteTrack NaN bug.
-    # We enforce NMS (iou=0.4) to stop overlapping boxes.
     results = yolo_person.track(
         frame_bgr,
         conf=0.50,
         iou=0.40,
-        classes=[0],                 # person only
+        classes=[0],                 
         tracker="botsort.yaml",      
         persist=True,
         verbose=False
@@ -152,14 +150,12 @@ def process_frame(image_b64):
             x1, y1, x2, y2 = map(int, box)
             track_id = int(track_id)
 
-            # Prevent massive full-screen boxes or tiny glitches
             if (x2 - x1) < 40 or (y2 - y1) < 40: continue
 
-            # Extract Top 35% of the body (The Head ROI)
-            head_h = int((y2 - y1) * 0.35)
+            # 🚀 FIX 1: Increased to 50% so we don't cut off the chin when sitting close!
+            head_h = int((y2 - y1) * 0.50)
             hx1, hy1, hx2, hy2 = x1, y1, x2, y1 + head_h
             
-            # Pad it slightly
             pad = 20
             hx1 = max(0, hx1 - pad)
             hy1 = max(0, hy1 - pad)
@@ -167,36 +163,32 @@ def process_frame(image_b64):
             hy2 = min(img.height, hy2 + pad)
 
             if track_id not in track_state:
-                # 🚀 QUALITY GATE: Pass the Head ROI to MTCNN
                 head_crop = img.crop((hx1, hy1, hx2, hy2))
                 face_tensor = mtcnn(head_crop)
                 
                 if face_tensor is not None:
-                    # MTCNN found a real face! Extract DNA.
                     emb = extract_embedding(face_tensor)
                     sid, name, score = recognize_face(emb)
 
-                    # Continuous Learning trigger
                     if sid and 0.80 < score < 0.96 and len(face_db[sid]["embeddings"]) < 20:
                         face_db[sid]["embeddings"].append(emb.tolist())
                         save_face_db(face_db)
 
                     track_state[track_id] = {"student_id": sid, "name": name, "status": "known" if sid else "unknown"}
                 else:
-                    # MTCNN rejected it (person looking away, or it was just a shadow)
-                    track_state[track_id] = {"student_id": None, "name": "Scanning Face...", "status": "scanning"}
+                    # 🚀 FIX 2: If MTCNN can't see the face, drop to UNKNOWN so it turns RED and is clickable!
+                    track_state[track_id] = {"student_id": None, "name": "Unknown", "status": "unknown"}
             
             person = track_state[track_id]
             current_frame_tracks[track_id] = person
 
             faces_out.append({
-                "box":[x1, y1, x2 - x1, y2 - y1], # We return the whole body box for UI clicks!
+                "box":[x1, y1, x2 - x1, y2 - y1], 
                 "student_id": person["student_id"],
                 "name": person["name"],
                 "status": person["status"]
             })
 
-    # Clear memory of people who left the frame
     track_state = current_frame_tracks
     return faces_out
 
