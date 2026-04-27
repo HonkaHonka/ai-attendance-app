@@ -179,73 +179,62 @@ function App() {
   useEffect(() => { return () => stopSurveillance(); },[]);
 
   // 🚀 FIX 1: DYNAMIC CANVAS SCALING
+  // DRAW GREEN/RED BOXES ON CANVAS
   useEffect(() => {
     if (canvasRef.current && webcamRef.current && webcamRef.current.video) {
       const video = webcamRef.current.video;
       const canvas = canvasRef.current;
       
-      // Match the canvas CSS dimensions exactly to the Video DOM element
-      canvas.width = video.clientWidth;
-      canvas.height = video.clientHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      // Calculate the Math Ratio (Original 4K Image vs Displayed CSS Image)
-      const scaleX = video.clientWidth / video.videoWidth;
-      const scaleY = video.clientHeight / video.videoHeight;
-
-      detectedFaces.forEach(face => {
-        const [origX, origY, origW, origH] = face.box;
+      // 🚀 FIX: Match the canvas internal resolution EXACTLY to the video resolution
+      // The CSS will scale them both together perfectly. No scaleX/scaleY math needed!
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
         
-        // Scale the Python coordinates to fit perfectly on the TV screen
-        const x = origX * scaleX;
-        const y = origY * scaleY;
-        const w = origW * scaleX;
-        const h = origH * scaleY;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        ctx.beginPath();
-        ctx.lineWidth = 4;
-        
-        const isUnknown = face.name === "Unknown";
-        if (!isUnknown) { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
-        else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
-        
-        ctx.rect(x, y, w, h);
-        ctx.stroke();
+        detectedFaces.forEach(face => {
+          const[x, y, w, h] = face.box;
+          
+          ctx.beginPath();
+          ctx.lineWidth = 4;
+          
+          if (face.status === 'known') { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
+          else if (face.status === 'scanning') { ctx.strokeStyle = '#ffcb05'; ctx.fillStyle = '#ffcb05'; }
+          else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
+          
+          ctx.rect(x, y, w, h);
+          ctx.stroke();
 
-        ctx.font = 'bold 18px Arial';
-        const text = face.name;
-        const textWidth = ctx.measureText(text).width;
-        ctx.fillRect(x, y - 30, textWidth + 20, 30);
-        ctx.fillStyle = '#fff';
-        ctx.fillText(text, x + 10, y - 8);
-      });
+          ctx.font = 'bold 24px Arial';
+          const text = face.name;
+          const textWidth = ctx.measureText(text).width;
+          ctx.fillRect(x, y - 35, textWidth + 20, 35);
+          ctx.fillStyle = '#fff';
+          ctx.fillText(text, x + 10, y - 8);
+        });
+      }
     }
-  },[detectedFaces]);
+  }, [detectedFaces]);
 
-  // 🚀 FIX 2: DYNAMIC CLICK MAPPING
   const handleCanvasClick = (e) => {
     const canvas = canvasRef.current;
     if (!canvas || !webcamRef.current || !webcamRef.current.video) return;
     
     const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
-
     const video = webcamRef.current.video;
-    const scaleX = video.clientWidth / video.videoWidth;
-    const scaleY = video.clientHeight / video.videoHeight;
+    
+    // Convert the mouse click on the CSS element back to the native Video Resolution
+    const scaleX = video.videoWidth / rect.width;
+    const scaleY = video.videoHeight / rect.height;
+    
+    const clickX = (e.clientX - rect.left) * scaleX;
+    const clickY = (e.clientY - rect.top) * scaleY;
 
     detectedFaces.forEach(face => {
-      const[origX, origY, origW, origH] = face.box;
-      
-      // Apply the same scale to figure out where we clicked!
-      const x = origX * scaleX;
-      const y = origY * scaleY;
-      const w = origW * scaleX;
-      const h = origH * scaleY;
-
-      if (face.name === 'Unknown' && clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
+      const[x, y, w, h] = face.box;
+      if (face.status === 'unknown' && clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
         const frame = webcamRef.current.getScreenshot();
         setQuickEnrollData({ image: frame, box: face.box });
       }
