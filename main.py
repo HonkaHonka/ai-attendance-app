@@ -11,7 +11,6 @@ import pickle
 import torch
 from PIL import Image
 import io
-import asyncio
 from ultralytics import YOLO
 from facenet_pytorch import MTCNN, InceptionResnetV1
 from typing import Dict
@@ -184,58 +183,42 @@ def process_frame(image_b64):
             track_id = int(track_id)
             if (x2 - x1) < 40 or (y2 - y1) < 40: continue
 
-            # Get previous memory of this track ID
             person = live_tracker_memory.get(track_id, {
-                "student_id": None, "name": "Scanning...", "status": "scanning", "frames_no_face": 0, "face_box": None
+                "student_id": None, "name": "Scanning...", "status": "scanning", "frames_no_face": 0
             })
 
-            # Extract Head ROI (Top 40%)
             head_h = int((y2 - y1) * 0.40)
             hx1, hy1 = max(0, x1 - 20), max(0, y1 - 20)
             hx2, hy2 = min(img.width, x2 + 20), min(img.height, y1 + head_h + 20)
-            head_crop = img.crop((hx1, hy1, hx2, hy2))
             
-            # 🚀 NEW: STRICT QUALITY GATE & EXACT FACE COORDINATES
-            f_boxes, f_probs = mtcnn.detect(head_crop)
+            # 🚀 SAFETY FIX: Prevent crash if crop dimensions are somehow zero
+            if hx2 <= hx1 or hy2 <= hy1:
+                continue
             
-            # Require 85% probability that it is a REAL face (eliminates back-of-head & reflections)
-            if f_boxes is not None and len(f_boxes) > 0 and f_probs[0] > 0.85:
-                person["frames_no_face"] = 0
-                
-                # Calculate the exact mathematical coordinates of the FACE inside the room
-                fx1, fy1, fx2, fy2 = f_boxes[0]
-                abs_x = int(hx1 + fx1)
-                abs_y = int(hy1 + fy1)
-                abs_w = int(fx2 - fx1)
-                abs_h = int(fy2 - fy1)
-                person["face_box"] =[abs_x, abs_y, abs_w, abs_h]
-
-                # Extract DNA
-                face_tensor = mtcnn.extract(head_crop, f_boxes, save_path=None)[0]
+            face_tensor = mtcnn(img.crop((hx1, hy1, hx2, hy2)))
+            
+            if face_tensor is not None:
+                person["frames_no_face"] = 0 
                 emb = extract_embedding(face_tensor)
                 sid, name, score = recognize_face(emb)
 
                 if sid:
                     person["student_id"], person["name"], person["status"] = sid, name, "known"
-                    if 0.80 < score < 0.96 and len(global_face_db[sid]["embeddings"]) < 20:
+                    if 0.80 < score < 0.96 and len(global_face_db[sid]["embeddings"]) < 15:
                         global_face_db[sid]["embeddings"].append(emb.tolist())
                         save_required = True
                 else:
                     person["student_id"], person["name"], person["status"] = None, "Unknown", "unknown"
             else:
                 person["frames_no_face"] += 1
-                person["face_box"] =[hx1, hy1, hx2 - hx1, hy2 - hy1] # Fallback box
-                
-                # 🚀 FIX: Instantly forget them if face is missing for 2 sweeps!
-                if person["frames_no_face"] >= 2:
+                if person["frames_no_face"] > 3:
                     person["student_id"], person["name"], person["status"] = None, "No Face", "no_face"
 
             current_frame_tracks[track_id] = person
 
-            # 🚀 We send ONLY the exact Face Box to React, NOT the body box!
             if person["status"] != "no_face":
                 faces_out.append({
-                    "box": person["face_box"],
+                    "box":[x1, y1, x2 - x1, y2 - y1],
                     "student_id": person["student_id"],
                     "name": person["name"],
                     "status": person["status"]
@@ -253,7 +236,9 @@ async def ws_surveillance(ws: WebSocket):
     try:
         while True:
             data = await ws.receive_json()
-            faces = await asyncio.to_thread(process_frame, data["image"])
+            # 🚀 THE FATAL F.conv2d FIX: Removed asyncio.to_thread!
+            # Processing sequentially completely eliminates PyTorch CPU memory corruption!
+            faces = process_frame(data["image"])
             await ws.send_json({"status": "success", "faces": faces})
     except WebSocketDisconnect:
         live_tracker_memory.clear()
@@ -271,13 +256,16 @@ class AssignPayload(BaseModel):
 def assign_face(p: AssignPayload):
     if "," in p.image: p.image = p.image.split(",")[1]
     img = Image.open(io.BytesIO(base64.b64decode(p.image))).convert("RGB")
-    
-    # 🚀 FIX: Since React now sends EXACT FACE coordinates, we just pad it slightly for high quality DNA
     x, y, w, h = map(int, p.box)
-    pad_x, pad_y = int(w * 0.20), int(h * 0.20)
-    hx1, hy1 = max(0, x - pad_x), max(0, y - pad_y)
-    hx2, hy2 = min(img.width, x + w + pad_x), min(img.height, y + h + pad_y)
     
+    head_h = int(h * 0.40)
+    hx1, hy1 = max(0, x - 20), max(0, y - 20)
+    hx2, hy2 = min(img.width, x + w + 20), min(img.height, y + head_h + 20)
+    
+    # Safety check
+    if hx2 <= hx1 or hy2 <= hy1:
+        raise HTTPException(status_code=400, detail="Invalid crop area.")
+
     face_tensor = mtcnn(img.crop((hx1, hy1, hx2, hy2)))
     if face_tensor is None:
         raise HTTPException(status_code=400, detail="No face detected. Ensure student is looking at camera.")
@@ -292,7 +280,7 @@ def assign_face(p: AssignPayload):
     return {"status": "success", "message": "Face Enrolled Successfully!"}
 
 # =========================================================
-# EXCEL EXPORT
+# EXCEL EXPORT (RESTORED)
 # =========================================================
 class AttendanceExportPayload(BaseModel):
     class_nbr: int
