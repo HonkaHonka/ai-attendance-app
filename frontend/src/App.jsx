@@ -5,12 +5,7 @@ import './App.css';
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
-const VIDEO_CONSTRAINTS = {
-  width: 1280,
-  height: 720,
-  facingMode: "user" 
-};
-
+// We leave out VIDEO_CONSTRAINTS here so the TV uses its native, natural view!
 function App() {
   const[view, setView] = useState('login'); 
   const[email, setEmail] = useState('');
@@ -22,7 +17,7 @@ function App() {
 
   const[isModalOpen, setIsModalOpen] = useState(false);
   const[enrollStep, setEnrollStep] = useState(''); 
-  const [capturedImages, setCapturedImages] = useState({});
+  const[capturedImages, setCapturedImages] = useState({});
   const[isCapturing, setIsCapturing] = useState(false); 
   
   const[isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
@@ -32,13 +27,15 @@ function App() {
 
   const[isSurveillanceActive, setIsSurveillanceActive] = useState(false);
   const[detectedFaces, setDetectedFaces] = useState([]);
-  const[quickEnrollData, setQuickEnrollData] = useState(null); 
+  
+  // 🚀 NEW: State for our Custom Live Cinematic Zoom
+  const[liveZoomTarget, setLiveZoomTarget] = useState(null); 
   
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
-  const zoomCanvasRef = useRef(null); // Reference for the new Zoom Canvas
+  const pipCanvasRef = useRef(null); // 🚀 NEW: Ref for the Picture-in-Picture display
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -173,7 +170,12 @@ function App() {
     } else {
       setIsSurveillanceActive(true);
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
-      wsRef.current.onopen = () => { sendFrameToWebSocket(); };
+      
+      wsRef.current.onopen = () => {
+        console.log("WebSocket Connected!");
+        sendFrameToWebSocket(); 
+      };
+
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.faces) {
@@ -196,10 +198,12 @@ function App() {
     setIsSurveillanceActive(false);
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     setDetectedFaces([]);
+    setLiveZoom(null);
   };
 
   useEffect(() => { return () => stopSurveillance(); },[]);
 
+  // 🚀 DRAW LOOP FOR MAIN CANVAS & PiP CANVAS
   useEffect(() => {
     if (canvasRef.current && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
       const video = surveillanceWebcamRef.current.video;
@@ -238,16 +242,28 @@ function App() {
           ctx.fillStyle = '#fff';
           ctx.fillText(text, x + 10, y - 8);
         });
+
+        // 🚀 LIVE PiP DRAWING: Draw the raw video onto the small corner window if Zoom is active!
+        if (liveZoom && pipCanvasRef.current) {
+          const pipCtx = pipCanvasRef.current.getContext('2d');
+          pipCanvasRef.current.width = video.videoWidth;
+          pipCanvasRef.current.height = video.videoHeight;
+          pipCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+        }
       }
     }
-  },[detectedFaces]);
+  },[detectedFaces, liveZoom]);
 
   const handleCanvasClick = (e) => {
+    // If we are already zoomed in, ignore clicks on the canvas!
+    if (liveZoom) return;
+
     const canvas = canvasRef.current;
     if (!canvas || !surveillanceWebcamRef.current || !surveillanceWebcamRef.current.video) return;
     
     const rect = canvas.getBoundingClientRect();
     const video = surveillanceWebcamRef.current.video;
+    
     const scaleX = video.videoWidth / rect.width;
     const scaleY = video.videoHeight / rect.height;
     
@@ -257,67 +273,45 @@ function App() {
     detectedFaces.forEach(face => {
       const[origX, origY, origW, origH] = face.box;
       
+      // Allow clicking on both Unknown (Red) AND Scanning (Yellow) boxes!
       if ((face.status === 'unknown' || face.status === 'scanning') && 
           clickX >= origX && clickX <= origX + origW && 
           clickY >= origY && clickY <= origY + origH) {
         
-        // 🚀 THE FIX: We capture the frame, STOP the live feed, and open the Zoom Modal!
-        const frame = surveillanceWebcamRef.current.getScreenshot();
-        setQuickEnrollData({ image: frame, box: face.box });
-        stopSurveillance(); // Pauses the background chaos while the teacher assigns the name
+        // 🚀 THE MAGIC: Enter Live Zoom Mode!
+        // We calculate the center of the student's chest/face to target the zoom.
+        const targetCenterX = (origX + (origW / 2)) * (rect.width / video.videoWidth);
+        const targetCenterY = (origY + (origH * 0.3)) * (rect.height / video.videoHeight); // Target the head/chest
+
+        setLiveZoom({
+           origBox: face.box,
+           centerX: targetCenterX,
+           centerY: targetCenterY
+        });
       }
     });
   };
 
-  // 🚀 NEW: This effect handles drawing the "Digital Zoom" on the popup canvas
-  // --- UPGRADED: DIGITAL ZOOM "PORTRAIT" EFFECT ---
-  useEffect(() => {
-    if (quickEnrollData && zoomCanvasRef.current) {
-      const img = new Image();
-      img.onload = () => {
-        const ctx = zoomCanvasRef.current.getContext('2d');
-        const[x, y, w, h] = quickEnrollData.box;
-        
-        // 🚀 FIX: Instead of a tight face crop, we take a wider "Head & Shoulders" portrait.
-        // This prevents the image from over-stretching and looking heavily pixelated!
-        const padX = w * 0.6; // Take 60% more space on the sides
-        const padY = h * 0.4; // Take 40% more space on top/bottom
-        
-        const sx = Math.max(0, x - padX);
-        const sy = Math.max(0, y - padY);
-        const sw = Math.min(img.width - sx, w + (padX * 2));
-        const sh = Math.min(img.height - sy, h + (padY * 2)); // Crop down to mid-chest
-
-        // 🚀 FIX: Turn on Canvas High-Quality Anti-Aliasing (Smoothing)
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-
-        // Draw it into the 400x400 circular canvas
-        ctx.clearRect(0, 0, 400, 400);
-        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 400, 400);
-      };
-      img.src = quickEnrollData.image;
-    }
-  },[quickEnrollData]);
-
-  const assignQuickEnroll = async (studentId, studentName) => {
+  const assignLiveEnroll = async (studentId, studentName) => {
     try {
+      // Grab the high-res screenshot while the video is still playing live
+      const liveFrame = surveillanceWebcamRef.current.getScreenshot();
+      
       const response = await fetch(`${API_BASE}/assign-face`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             student_id: String(studentId),
             student_name: studentName,
-            image: quickEnrollData.image,
-            box: quickEnrollData.box 
+            image: liveFrame,
+            box: liveZoom.origBox // Python will use the original YOLO coordinates to crop the face
           })
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
       
-      alert(`✅ Successfully Enrolled!`);
-      setQuickEnrollData(null); 
-      toggleSurveillance(); // 🚀 Restart the live feed instantly after saving!
+      alert(`✅ Successfully Enrolled ${studentName}!`);
+      setLiveZoom(null); // Zooms out immediately!
       
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
@@ -335,6 +329,7 @@ function App() {
         <div className="nav-links"><a>Home</a><a>Study</a><a>Admissions</a><a>Research</a><a>Student Life</a><a>About Us</a></div>
       </nav>
 
+      {/* ---------------- LOGIN VIEW ---------------- */}
       {view === 'login' && (
         <>
           <div className="hero-section">
@@ -366,6 +361,7 @@ function App() {
         </>
       )}
 
+      {/* ---------------- FACULTY DASHBOARD ---------------- */}
       {view === 'classes' && (
         <div className="app-container">
           <div className="content-box">
@@ -399,6 +395,7 @@ function App() {
         </div>
       )}
 
+      {/* ---------------- STUDENT LIST ---------------- */}
       {view === 'students' && (
         <div className="app-container">
           <div className="content-box">
@@ -417,7 +414,7 @@ function App() {
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
               <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>
-                Launch the Full-Screen AI Tracker to automatically mark student attendance.
+                YOLOv8 + PyTorch crowd tracking. <b>Click on Red (Unknown) boxes</b> to Quick Enroll a student!
               </p>
               <button 
                 style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} 
@@ -467,11 +464,11 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- FULL-SCREEN SURVEILLANCE OVERLAY ---------------- */}
+      {/* ---------------- NEW: FULL-SCREEN SURVEILLANCE OVERLAY WITH LIVE ZOOM ---------------- */}
       {isSurveillanceActive && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           
-          <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
             <h2 style={{ margin: 0, color: 'var(--accent-gold)' }}>🔴 Live Classroom Tracking</h2>
             <button 
               onClick={stopSurveillance} 
@@ -480,65 +477,74 @@ function App() {
             </button>
           </div>
 
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
-            <div style={{ position: 'relative', aspectRatio: '16/9', maxHeight: '100%', maxWidth: '100%' }}>
+          <div style={{ flex: 1, position: 'relative', background: '#000', overflow: 'hidden' }}>
+            
+            {/* 🚀 THE MAGIC ZOOM WRAPPER */}
+            <div style={{ 
+              position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
+              transform: liveZoom ? `scale(2.5) translate(calc(20% - ${liveZoom.centerX}px/2.5), calc(50% - ${liveZoom.centerY}px/2.5))` : 'scale(1) translate(0px, 0px)',
+              transformOrigin: liveZoom ? `${liveZoom.centerX}px ${liveZoom.centerY}px` : 'center center',
+              transition: 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)'
+            }}>
               <Webcam 
                 ref={surveillanceWebcamRef} 
                 audio={false} 
                 mirrored={false} 
                 screenshotFormat="image/jpeg" 
-                videoConstraints={VIDEO_CONSTRAINTS} 
-                style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
+                style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain', position: 'absolute' }}
               />
               <canvas 
                 ref={canvasRef} 
                 onClick={handleCanvasClick} 
-                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: 'crosshair' }} 
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: liveZoom ? 'default' : 'crosshair' }} 
               />
             </div>
-          </div>
-        </div>
-      )}
 
-      {/* ---------------- NEW: TARGET LOCKED INVESTIGATION ZOOM UI ---------------- */}
-      {quickEnrollData && (
-        <div className="modal-overlay" style={{zIndex: 5000, backdropFilter: 'blur(10px)'}}>
-          <div className="modal-content" style={{maxWidth: '850px', display: 'flex', gap: '30px', alignItems: 'flex-start', background: '#1e1e2d', color: 'white', border: '2px solid #3e426b'}}>
-            
-            {/* LEFT: The High-Res Zoomed In View */}
-            <div style={{flex: 1, textAlign: 'center'}}>
-              <h3 style={{color: 'var(--accent-gold)', marginTop: 0}}>🎯 Target Locked</h3>
-              <canvas 
-                ref={zoomCanvasRef} 
-                width="400" height="400" 
-                style={{borderRadius: '12px', border: '4px solid var(--accent-gold)', objectFit: 'cover', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', width: '100%'}} 
-              />
-              <p style={{color: '#aaa', fontSize: '14px', marginTop: '15px'}}>Clicking assign will extract biometric DNA from this specific crop.</p>
-            </div>
-
-            {/* RIGHT: Name Selection Panel */}
-            <div style={{flex: 1, textAlign: 'left'}}>
-              <h2 className="modal-header" style={{marginTop: 0, borderBottomColor: '#444'}}>⚡ Quick Enroll</h2>
-              <p style={{color: '#ccc'}}>Who is this student?</p>
-              
-              <div className="student-select-list" style={{maxHeight: '350px', border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c'}}>
-                {students.map((student, idx) => (
-                  <div key={idx} className="student-select-item" style={{borderBottomColor: '#444', color: 'white'}} onClick={() => assignQuickEnroll(student['Student ID'], student['Student Name'])}>
-                    <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
-                    <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
+            {/* 🚀 THE PICTURE-IN-PICTURE (PiP) AND SIDE PANEL */}
+            {liveZoom && (
+              <>
+                {/* Top Right PiP Frame */}
+                <div 
+                  onClick={() => setLiveZoom(null)} 
+                  style={{
+                    position: 'absolute', top: '20px', left: '20px', width: '320px', height: '180px', 
+                    border: '3px solid white', borderRadius: '8px', overflow: 'hidden',
+                    boxShadow: '0 10px 20px rgba(0,0,0,0.5)', cursor: 'pointer', zIndex: 4000,
+                    background: '#000'
+                  }}>
+                  <canvas ref={pipCanvasRef} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                  <div style={{position: 'absolute', bottom: '5px', left: '0', width: '100%', textAlign: 'center', color: 'white', background: 'rgba(0,0,0,0.6)', padding: '2px 0', fontSize: '12px', fontWeight: 'bold'}}>
+                    Click to Zoom Out
                   </div>
-                ))}
-              </div>
-              
-              <br/>
-              <button className="btn-cancel" style={{width: '100%'}} onClick={() => {
-                setQuickEnrollData(null);
-                toggleSurveillance(); // 🚀 Resumes the live feed if they cancel!
-              }}>
-                Cancel & Resume Tracking
-              </button>
-            </div>
+                </div>
 
+                {/* Right Side Assignment Panel */}
+                <div style={{ 
+                  position: 'absolute', right: 0, top: 0, width: '400px', height: '100%', 
+                  background: 'rgba(20,20,30,0.95)', zIndex: 4000, padding: '20px', 
+                  borderLeft: '4px solid var(--accent-gold)', overflowY: 'auto',
+                  boxShadow: '-10px 0 30px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column'
+                }}>
+                  <h2 style={{color: 'white', marginTop: 0}}>⚡ Live Enroll</h2>
+                  <p style={{color: '#aaa', fontSize: '14px', marginBottom: '20px'}}>
+                    Camera is live. Wait until the student looks forward, then click their name.
+                  </p>
+
+                  <div className="student-select-list" style={{flex: 1, border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c', overflowY: 'auto', padding: '10px'}}>
+                    {students.map((student, idx) => (
+                      <div key={idx} className="student-select-item" style={{borderBottomColor: '#444', color: 'white'}} onClick={() => assignLiveEnroll(student['Student ID'], student['Student Name'])}>
+                        <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
+                        <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
+                      </div>
+                    ))}
+                  </div>
+                  
+                  <button className="btn-cancel" style={{width: '100%', marginTop: '20px', padding: '15px'}} onClick={() => setLiveZoom(null)}>
+                    Cancel & Zoom Out
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -552,7 +558,7 @@ function App() {
               <>
                 <p>Please align the student's face within the oval.</p>
                 <div className="webcam-container">
-                  <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={VIDEO_CONSTRAINTS} />
+                  <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" />
                   <div className="webcam-mask"></div>
                   <div className="webcam-overlay-text">
                     {enrollStep === 'front' && "👤 Look straight into the camera"}
@@ -595,7 +601,7 @@ function App() {
             <h2 className="modal-header">Verify Identity</h2>
             <h3 style={{marginTop: 0, color: '#555'}}>Target Student: {verifyingStudent['Student Name']}</h3>
             <div className="webcam-container" style={{minHeight: '250px'}}>
-              <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={VIDEO_CONSTRAINTS} />
+              <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" />
               <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
             </div>
             <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
