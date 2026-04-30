@@ -356,7 +356,7 @@ function App() {
         // 🚀 THE MAGIC: Enter Live Zoom Mode!
         // Because your backend currently sends BODY boxes, we target the top 20% of the box to zoom on the FACE.
         const originX = ((origX + origW / 2) / video.videoWidth) * 100;
-        const originY = ((origY + origH * 0.2) / video.videoHeight) * 100;
+        const originY = ((origY + origH / 2) / video.videoHeight) * 100;
 
         setLiveZoom({
            origBox: face.box,

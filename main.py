@@ -77,7 +77,7 @@ def students(email: str, class_nbr: int):
     return class_df[["Student ID", "Student Name"]].to_dict("records")
 
 # =========================================================
-# ENROLLMENT & VERIFICATION (RESTORED)
+# ENROLLMENT & VERIFICATION
 # =========================================================
 class EnrollPayload(BaseModel):
     student_id: str
@@ -146,6 +146,21 @@ live_tracker_memory = {}
 next_track_id = 1
 RECOGNITION_THRESHOLD = 0.65
 
+def extract_embedding(face_tensor):
+    with torch.no_grad():
+        return face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+
+def recognize_face(embedding):
+    best_score = -1
+    best_id, best_name = None, "Unknown"
+    for sid, data in global_face_db.items():
+        for saved in data["embeddings"]:
+            sim = cosine_similarity(embedding, saved)
+            if sim > best_score:
+                best_score, best_id, best_name = sim, sid, data["name"]
+    if best_score >= RECOGNITION_THRESHOLD: return best_id, best_name, best_score
+    return None, "Unknown", best_score
+
 def process_frame(image_b64):
     global live_tracker_memory, next_track_id
     if "," in image_b64: image_b64 = image_b64.split(",")[1]
@@ -171,51 +186,56 @@ def process_frame(image_b64):
 
             # Get previous memory of this track ID
             person = live_tracker_memory.get(track_id, {
-                "student_id": None, "name": "Scanning...", "status": "scanning", "frames_no_face": 0
+                "student_id": None, "name": "Scanning...", "status": "scanning", "frames_no_face": 0, "face_box": None
             })
 
-            # 🚀 FIX: Increased Head ROI to 50% so it doesn't fail when you sit close!
-            head_h = int((y2 - y1) * 0.50)
+            # Extract Head ROI (Top 40%)
+            head_h = int((y2 - y1) * 0.40)
             hx1, hy1 = max(0, x1 - 20), max(0, y1 - 20)
             hx2, hy2 = min(img.width, x2 + 20), min(img.height, y1 + head_h + 20)
+            head_crop = img.crop((hx1, hy1, hx2, hy2))
             
-            # THE QUALITY GATE
-            face_tensor = mtcnn(img.crop((hx1, hy1, hx2, hy2)))
+            # 🚀 NEW: STRICT QUALITY GATE & EXACT FACE COORDINATES
+            f_boxes, f_probs = mtcnn.detect(head_crop)
             
-            if face_tensor is not None:
-                person["frames_no_face"] = 0 # Reset miss counter
-                with torch.no_grad():
-                    emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+            # Require 85% probability that it is a REAL face (eliminates back-of-head & reflections)
+            if f_boxes is not None and len(f_boxes) > 0 and f_probs[0] > 0.85:
+                person["frames_no_face"] = 0
                 
-                best_score = -1
-                best_id, best_name = None, "Unknown"
-                for sid, data in global_face_db.items():
-                    for saved in data["embeddings"]:
-                        sim = cosine_similarity(emb, saved)
-                        if sim > best_score:
-                            best_score, best_id, best_name = sim, sid, data["name"]
+                # Calculate the exact mathematical coordinates of the FACE inside the room
+                fx1, fy1, fx2, fy2 = f_boxes[0]
+                abs_x = int(hx1 + fx1)
+                abs_y = int(hy1 + fy1)
+                abs_w = int(fx2 - fx1)
+                abs_h = int(fy2 - fy1)
+                person["face_box"] =[abs_x, abs_y, abs_w, abs_h]
 
-                if best_score >= RECOGNITION_THRESHOLD:
-                    person["student_id"], person["name"], person["status"] = best_id, best_name, "known"
-                    # Active Learning
-                    if 0.80 < best_score < 0.96 and len(global_face_db[best_id]["embeddings"]) < 15:
-                        global_face_db[best_id]["embeddings"].append(emb.tolist())
+                # Extract DNA
+                face_tensor = mtcnn.extract(head_crop, f_boxes, save_path=None)[0]
+                emb = extract_embedding(face_tensor)
+                sid, name, score = recognize_face(emb)
+
+                if sid:
+                    person["student_id"], person["name"], person["status"] = sid, name, "known"
+                    if 0.80 < score < 0.96 and len(global_face_db[sid]["embeddings"]) < 20:
+                        global_face_db[sid]["embeddings"].append(emb.tolist())
                         save_required = True
                 else:
                     person["student_id"], person["name"], person["status"] = None, "Unknown", "unknown"
             else:
-                # No face found! (Back of head, reflection, or chair)
                 person["frames_no_face"] += 1
-                if person["frames_no_face"] > 3:
-                    # Drop the box if no face is seen for a few frames
+                person["face_box"] =[hx1, hy1, hx2 - hx1, hy2 - hy1] # Fallback box
+                
+                # 🚀 FIX: Instantly forget them if face is missing for 2 sweeps!
+                if person["frames_no_face"] >= 2:
                     person["student_id"], person["name"], person["status"] = None, "No Face", "no_face"
 
             current_frame_tracks[track_id] = person
 
-            # Send to React if it's a valid face/body
+            # 🚀 We send ONLY the exact Face Box to React, NOT the body box!
             if person["status"] != "no_face":
                 faces_out.append({
-                    "box":[x1, y1, x2 - x1, y2 - y1],
+                    "box": person["face_box"],
                     "student_id": person["student_id"],
                     "name": person["name"],
                     "status": person["status"]
@@ -251,19 +271,18 @@ class AssignPayload(BaseModel):
 def assign_face(p: AssignPayload):
     if "," in p.image: p.image = p.image.split(",")[1]
     img = Image.open(io.BytesIO(base64.b64decode(p.image))).convert("RGB")
-    x, y, w, h = map(int, p.box)
     
-    head_h = int(h * 0.50)
-    hx1, hy1 = max(0, x - 20), max(0, y - 20)
-    hx2, hy2 = min(img.width, x + w + 20), min(img.height, y + head_h + 20)
+    # 🚀 FIX: Since React now sends EXACT FACE coordinates, we just pad it slightly for high quality DNA
+    x, y, w, h = map(int, p.box)
+    pad_x, pad_y = int(w * 0.20), int(h * 0.20)
+    hx1, hy1 = max(0, x - pad_x), max(0, y - pad_y)
+    hx2, hy2 = min(img.width, x + w + pad_x), min(img.height, y + h + pad_y)
     
     face_tensor = mtcnn(img.crop((hx1, hy1, hx2, hy2)))
     if face_tensor is None:
         raise HTTPException(status_code=400, detail="No face detected. Ensure student is looking at camera.")
 
-    with torch.no_grad():
-        emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
-
+    emb = extract_embedding(face_tensor)
     if p.student_id not in global_face_db: global_face_db[p.student_id] = {"name": p.student_name, "embeddings":[]}
     global_face_db[p.student_id]["embeddings"].append(emb.tolist())
     save_face_db(global_face_db)
@@ -273,7 +292,7 @@ def assign_face(p: AssignPayload):
     return {"status": "success", "message": "Face Enrolled Successfully!"}
 
 # =========================================================
-# EXCEL EXPORT (RESTORED)
+# EXCEL EXPORT
 # =========================================================
 class AttendanceExportPayload(BaseModel):
     class_nbr: int
@@ -299,11 +318,6 @@ def export_attendance(payload: AttendanceExportPayload):
     headers = { 'Content-Disposition': f'attachment; filename="Attendance_Class_{payload.class_nbr}.xlsx"' }
     return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-# =========================================================
-# FRONTEND
-# =========================================================
-if os.path.exists("frontend/dist"):
-    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
+if os.path.exists("frontend/dist"): app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+if __name__ == "__main__": uvicorn.run("main:app", host="0.0.0.0", port=8000)
