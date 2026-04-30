@@ -5,13 +5,6 @@ import './App.css';
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
-// 🚀 MANDATORY: Keeps the AI fed with high-quality, perfectly proportioned images
-const VIDEO_CONSTRAINTS = {
-  width: 1280,
-  height: 720,
-  facingMode: "user" 
-};
-
 function App() {
   const[view, setView] = useState('login'); 
   const[email, setEmail] = useState('');
@@ -23,7 +16,7 @@ function App() {
 
   const[isModalOpen, setIsModalOpen] = useState(false);
   const[enrollStep, setEnrollStep] = useState(''); 
-  const [capturedImages, setCapturedImages] = useState({});
+  const[capturedImages, setCapturedImages] = useState({});
   const[isCapturing, setIsCapturing] = useState(false); 
   
   const[isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
@@ -35,10 +28,13 @@ function App() {
   const[detectedFaces, setDetectedFaces] = useState([]);
   const[quickEnrollData, setQuickEnrollData] = useState(null); 
   
+  const[liveZoom, setLiveZoom] = useState(null); 
+  
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
+  const pipCanvasRef = useRef(null); 
   const zoomCanvasRef = useRef(null);
 
   const handleLogin = async (e) => {
@@ -82,6 +78,7 @@ function App() {
         body: JSON.stringify({ class_nbr: Number(selectedClass), attendance_records: attendanceRecords })
       });
       if (!response.ok) throw new Error("Failed to generate report");
+
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -151,7 +148,7 @@ function App() {
         setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
       } else {
         setVerifyResult(`❌ Face Not Recognized in Database.`);
-        setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
+        setAttendanceRecords(prev => ({ ...prev,[verifyingStudent['Student ID']]: 'failed' }));
       }
     } catch (error) { setVerifyResult(`⚠️ Error: ${error.message}`); }
   };
@@ -173,7 +170,12 @@ function App() {
     } else {
       setIsSurveillanceActive(true);
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
-      wsRef.current.onopen = () => { sendFrameToWebSocket(); };
+      
+      wsRef.current.onopen = () => {
+        console.log("WebSocket Connected!");
+        sendFrameToWebSocket(); 
+      };
+
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.faces) {
@@ -188,7 +190,8 @@ function App() {
           requestAnimationFrame(sendFrameToWebSocket);
         }
       };
-      wsRef.current.onerror = () => { stopSurveillance(); };
+
+      wsRef.current.onerror = (error) => { stopSurveillance(); };
     }
   };
 
@@ -196,12 +199,13 @@ function App() {
     setIsSurveillanceActive(false);
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     setDetectedFaces([]);
+    setLiveZoom(null);
   };
 
   useEffect(() => { return () => stopSurveillance(); },[]);
 
   // ==========================================
-  // 🚀 PERFECT 16:9 ZERO-MATH DRAWING LOOP
+  // 🚀 FIX 1: ZERO-MATH PERFECT OVERLAY
   // ==========================================
   useEffect(() => {
     if (canvasRef.current && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
@@ -209,26 +213,21 @@ function App() {
       const canvas = canvasRef.current;
       
       if (video.videoWidth > 0 && video.videoHeight > 0) {
-        // Force the canvas resolution to match the video element's internal CSS size!
-        canvas.width = video.clientWidth;
-        canvas.height = video.clientHeight;
+        // MATCH THE NATIVE VIDEO RESOLUTION EXACTLY
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        
         const ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Simple scale mapping (Because CSS aspectRatio: 16/9 guarantees no black bars!)
-        const scaleX = video.clientWidth / video.videoWidth;
-        const scaleY = video.clientHeight / video.videoHeight;
-
         detectedFaces.forEach(face => {
-          const[origX, origY, origW, origH] = face.box;
-          
-          const x = origX * scaleX;
-          const y = origY * scaleY;
-          const w = origW * scaleX;
-          const h = origH * scaleY;
+          const[x, y, w, h] = face.box;
 
+          // NO SCALEX OR SCALEY MATH! We draw raw coordinates directly onto the raw canvas!
           ctx.beginPath();
-          ctx.lineWidth = 4;
+          // Thicker lines for 4K TV screens
+          ctx.lineWidth = video.videoWidth > 2000 ? 8 : 4; 
+          
           if (face.status === 'known') { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
           else if (face.status === 'scanning') { ctx.strokeStyle = '#ffcb05'; ctx.fillStyle = '#ffcb05'; }
           else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
@@ -236,59 +235,82 @@ function App() {
           ctx.rect(x, y, w, h);
           ctx.stroke();
 
-          ctx.font = 'bold 20px Arial';
+          const fontSize = video.videoWidth > 2000 ? 40 : 20;
+          ctx.font = `bold ${fontSize}px Arial`;
           const text = face.name;
           const textWidth = ctx.measureText(text).width;
-          ctx.fillRect(x, y - 35, textWidth + 20, 35);
+          ctx.fillRect(x, y - (fontSize + 15), textWidth + 20, fontSize + 15);
           ctx.fillStyle = '#fff';
-          ctx.fillText(text, x + 10, y - 8);
+          ctx.fillText(text, x + 10, y - 10);
         });
+
+        // 🚀 LIVE PiP DRAWING
+        if (liveZoom && pipCanvasRef.current) {
+          const pipCtx = pipCanvasRef.current.getContext('2d');
+          pipCanvasRef.current.width = video.videoWidth;
+          pipCanvasRef.current.height = video.videoHeight;
+          pipCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+        }
       }
     }
-  }, [detectedFaces]);
+  }, [detectedFaces, liveZoom]);
 
+  // ==========================================
+  // 🚀 FIX 2: REVERSE NATIVE CLICK MAPPING
+  // ==========================================
   const handleCanvasClick = (e) => {
+    if (liveZoom) return;
+
     const canvas = canvasRef.current;
     if (!canvas || !surveillanceWebcamRef.current || !surveillanceWebcamRef.current.video) return;
     
     const rect = canvas.getBoundingClientRect();
     const video = surveillanceWebcamRef.current.video;
     
-    // Translate click back to Python's 1280x720 grid
+    // Convert the mouse click on the CSS browser element back to Native 4K coordinates
     const scaleX = video.videoWidth / rect.width;
     const scaleY = video.videoHeight / rect.height;
+    
     const clickX = (e.clientX - rect.left) * scaleX;
     const clickY = (e.clientY - rect.top) * scaleY;
 
     detectedFaces.forEach(face => {
-      const[origX, origY, origW, origH] = face.box;
+      const[x, y, w, h] = face.box;
       
-      // Allow clicking on Unknown (Red) OR Scanning (Yellow) boxes
       if ((face.status === 'unknown' || face.status === 'scanning') && 
-          clickX >= origX && clickX <= origX + origW && 
-          clickY >= origY && clickY <= origY + origH) {
+          clickX >= x && clickX <= x + w && 
+          clickY >= y && clickY <= y + h) {
         
-        // Grab screenshot instantly and launch the Target Lock modal
         const frame = surveillanceWebcamRef.current.getScreenshot();
+        
+        // 🚀 TARGET LOCK ZOOM: Calculate the top 20% of the body box to zoom precisely on the head!
+        const originX = ((x + w / 2) / video.videoWidth) * 100;
+        const originY = ((y + h * 0.2) / video.videoHeight) * 100;
+
+        setLiveZoom({
+           origBox: face.box,
+           cssOrigin: `${originX}% ${originY}%`
+        });
+        
         setQuickEnrollData({ image: frame, box: face.box });
       }
     });
   };
 
   // ==========================================
-  // 🚀 DIGITAL ZOOM FOR TARGET LOCK MODAL
+  // 🚀 FIX 3: DIGITAL PORTRAIT (ID BADGE) ZOOM
   // ==========================================
   useEffect(() => {
     if (quickEnrollData && zoomCanvasRef.current) {
       const img = new Image();
       img.onload = () => {
         const ctx = zoomCanvasRef.current.getContext('2d');
-        const[x, y, w, h] = quickEnrollData.box;
+        const[x, y, w, h] = quickEnrollData.box; // This is the YOLO Body Box
         
-        // Extract just the Head and Shoulders (Top 40% of body box)
-        const headH = h * 0.4;
-        const padX = w * 0.2;
-        const padY = headH * 0.3;
+        // We crop just the Head & Shoulders to make a clean Portrait
+        const headH = h * 0.40; 
+        const padX = w * 0.20; 
+        const padY = headH * 0.30; 
         
         const sx = Math.max(0, x - padX);
         const sy = Math.max(0, y - padY);
@@ -304,25 +326,35 @@ function App() {
     }
   },[quickEnrollData]);
 
-  const assignQuickEnroll = async (studentId, studentName) => {
+  const assignLiveEnroll = async (studentId, studentName) => {
     try {
+      const liveFrame = surveillanceWebcamRef.current.getScreenshot();
+      const[x, y, w, h] = liveZoom.origBox;
+      
+      const pad = w * 0.3;
+      const expandedBox =[ Math.max(0, x - pad), Math.max(0, y - pad), w + (pad * 2), h + (pad * 2) ];
+
       const response = await fetch(`${API_BASE}/assign-face`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             student_id: String(studentId),
             student_name: studentName,
-            image: quickEnrollData.image,
-            box: quickEnrollData.box 
+            image: liveFrame,
+            box: expandedBox 
           })
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
       
       alert(`✅ Successfully Enrolled!`);
-      setQuickEnrollData(null); 
+      setLiveZoom(null); 
+      setQuickEnrollData(null);
+      
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
+
+  const closeModal = () => setIsModalOpen(false);
 
   return (
     <div>
@@ -335,7 +367,6 @@ function App() {
         <div className="nav-links"><a>Home</a><a>Study</a><a>Admissions</a><a>Research</a><a>Student Life</a><a>About Us</a></div>
       </nav>
 
-      {/* ---------------- LOGIN VIEW ---------------- */}
       {view === 'login' && (
         <div className="hero-section">
           <div className="login-card">
@@ -349,7 +380,6 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- FACULTY DASHBOARD ---------------- */}
       {view === 'classes' && (
         <div className="app-container">
           <div className="content-box">
@@ -383,7 +413,6 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- STUDENT LIST ---------------- */}
       {view === 'students' && (
         <div className="app-container">
           <div className="content-box">
@@ -391,7 +420,10 @@ function App() {
             
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
               <h2 className="section-title" style={{ display: 'inline-block', margin: 0 }}>Class Roster: {selectedClass}</h2>
-              <button style={{ background: '#28a745', color: 'white', padding: '10px 20px', borderRadius: '5px', border: 'none', cursor: 'pointer', fontWeight: 'bold' }} onClick={downloadAttendanceReport}>
+              <button 
+                style={{ background: '#28a745', color: 'white', padding: '10px 20px', borderRadius: '5px', border: 'none', cursor: 'pointer', fontWeight: 'bold' }}
+                onClick={downloadAttendanceReport}
+              >
                 📥 Download Excel Report
               </button>
             </div>
@@ -399,7 +431,10 @@ function App() {
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
               <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>YOLOv8 + PyTorch crowd tracking. <b>Click on Red (Unknown) boxes</b> to Quick Enroll a student!</p>
-              <button style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} onClick={toggleSurveillance}>
+              <button 
+                style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} 
+                onClick={toggleSurveillance}
+              >
                 ▶ Launch Full-Screen Tracker
               </button>
             </div>
@@ -439,87 +474,78 @@ function App() {
 
       {/* ---------------- FULL-SCREEN SURVEILLANCE OVERLAY ---------------- */}
       {isSurveillanceActive && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           
-          <div style={{ width: '100%', padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
+          <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
             <h2 style={{ margin: 0, color: 'var(--accent-gold)' }}>🔴 Live Classroom Tracking</h2>
             <button onClick={stopSurveillance} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
               Close Tracker
             </button>
           </div>
 
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%' }}>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
             
-            {/* 🚀 THE FIX: Strict 16:9 Container forces the video and canvas to align flawlessly without stretching or cropping! */}
-            <div style={{ position: 'relative', width: '100%', maxHeight: '100%', aspectRatio: '16/9', display: 'flex', justifyContent: 'center' }}>
+            {/* 🚀 THE FIX: NO WIDTH/HEIGHT CONSTRICTIONS. 
+                Using width: 100%, height: auto means NO letterboxing inside the video tag.
+                The Canvas overlaps perfectly 1:1 on top. */}
+            <div style={{ position: 'relative', width: '100%', maxWidth: '100%', display: 'flex', justifyContent: 'center',
+              transform: liveZoom ? `scale(2.5)` : 'scale(1)',
+              transformOrigin: liveZoom ? liveZoom.cssOrigin : 'center center',
+              transition: 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)'
+             }}>
               <Webcam 
                 ref={surveillanceWebcamRef} 
                 audio={false} 
                 mirrored={false} 
                 screenshotFormat="image/jpeg" 
-                videoConstraints={VIDEO_CONSTRAINTS} 
-                style={{ width: '100%', height: '100%', objectFit: 'contain', position: 'absolute' }}
+                videoConstraints={{ facingMode: "user" }} // Let camera dictate natural wide resolution
+                style={{ width: '100%', height: 'auto', display: 'block' }}
               />
               <canvas 
                 ref={canvasRef} 
                 onClick={handleCanvasClick} 
-                style={{ position: 'absolute', width: '100%', height: '100%', zIndex: 10, cursor: 'crosshair' }} 
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: liveZoom ? 'default' : 'crosshair' }} 
               />
             </div>
-          </div>
-        </div>
-      )}
 
-      {/* ---------------- TARGET LOCKED INVESTIGATION ZOOM UI ---------------- */}
-      {quickEnrollData && (
-        <div className="modal-overlay" style={{zIndex: 5000, backdropFilter: 'blur(10px)'}}>
-          <div className="modal-content" style={{maxWidth: '850px', display: 'flex', gap: '30px', alignItems: 'flex-start', background: '#1e1e2d', color: 'white', border: '2px solid #3e426b'}}>
-            
-            {/* LEFT: The High-Res Zoomed In View */}
-            <div style={{flex: 1, textAlign: 'center'}}>
-              <h3 style={{color: 'var(--accent-gold)', marginTop: 0}}>🎯 Target Locked</h3>
-              <canvas 
-                ref={zoomCanvasRef} 
-                width="400" height="400" 
-                style={{borderRadius: '12px', border: '4px solid var(--accent-gold)', objectFit: 'cover', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', width: '100%', background: '#000'}} 
-              />
-              <p style={{color: '#aaa', fontSize: '14px', marginTop: '15px'}}>Ensure face is clearly visible in the preview.</p>
-            </div>
-
-            {/* RIGHT: Name Selection Panel */}
-            <div style={{flex: 1, textAlign: 'left'}}>
-              <h2 className="modal-header" style={{marginTop: 0, borderBottomColor: '#444'}}>⚡ Quick Enroll</h2>
-              <p style={{color: '#ccc'}}>Who is this student?</p>
-              
-              <div className="student-select-list" style={{maxHeight: '350px', border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c', overflowY: 'auto', padding: '10px'}}>
-                {students.map((student, idx) => (
-                  <div key={idx} className="student-select-item" style={{borderBottomColor: '#444', color: 'white'}} onClick={() => assignQuickEnroll(student['Student ID'], student['Student Name'])}>
-                    <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
-                    <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
+            {/* 🚀 PiP AND SIDE PANEL */}
+            {liveZoom && (
+              <>
+                <div 
+                  onClick={() => { setLiveZoom(null); setQuickEnrollData(null); }} 
+                  style={{
+                    position: 'absolute', top: '20px', left: '20px', width: '320px', height: '180px', 
+                    border: '3px solid white', borderRadius: '8px', overflow: 'hidden',
+                    boxShadow: '0 10px 30px rgba(0,0,0,0.8)', cursor: 'pointer', zIndex: 4000,
+                    background: '#000'
+                  }}>
+                  <canvas ref={pipCanvasRef} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                  <div style={{position: 'absolute', bottom: '5px', left: '0', width: '100%', textAlign: 'center', color: 'white', background: 'rgba(0,0,0,0.6)', padding: '4px 0', fontSize: '13px', fontWeight: 'bold'}}>
+                    Click here to Zoom Out
                   </div>
-                ))}
-              </div>
-              <br/>
-              <button className="btn-cancel" style={{width: '100%'}} onClick={() => setQuickEnrollData(null)}>Cancel</button>
-            </div>
+                </div>
 
-          </div>
-        </div>
-      )}
-
-      {/* ---------------- 1-ON-1 VERIFICATION MODAL ---------------- */}
-      {isVerifyModalOpen && verifyingStudent && (
-        <div className="modal-overlay" style={{zIndex: 4000}}>
-          <div className="modal-content">
-            <h2 className="modal-header">Verify Identity</h2>
-            <h3 style={{marginTop: 0, color: '#555'}}>Target Student: {verifyingStudent['Student Name']}</h3>
-            <div className="webcam-container" style={{minHeight: '250px'}}>
-              <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={VIDEO_CONSTRAINTS} />
-              <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
-            </div>
-            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
-            <button className="btn-capture" onClick={runVerificationScan}>🔍 Scan Face</button>
-            <button className="btn-cancel" onClick={() => setIsVerifyModalOpen(false)}>Close</button>
+                <div style={{ 
+                  position: 'absolute', right: 0, top: 0, width: '400px', height: '100%', 
+                  background: 'rgba(20,20,30,0.95)', zIndex: 4000, padding: '20px', 
+                  borderLeft: '4px solid var(--accent-gold)', display: 'flex', flexDirection: 'column'
+                }}>
+                  <h2 style={{color: 'white', marginTop: 0}}>⚡ Live Enroll</h2>
+                  <p style={{color: '#aaa', fontSize: '14px', marginBottom: '20px'}}>Camera is live. Wait until the student looks at the camera, then click their name below to register their DNA!</p>
+                  <div className="student-select-list" style={{flex: 1, border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c', overflowY: 'auto', padding: '10px'}}>
+                    {students.map((student, idx) => (
+                      <div key={idx} className="student-select-item" style={{borderBottomColor: '#444', color: 'white'}} onClick={() => assignLiveEnroll(student['Student ID'], student['Student Name'])}>
+                        <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
+                        <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
+                      </div>
+                    ))}
+                  </div>
+                  <button className="btn-cancel" style={{width: '100%', marginTop: '20px', padding: '15px'}} onClick={() => { setLiveZoom(null); setQuickEnrollData(null); }}>
+                    Cancel & Zoom Out
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -533,7 +559,7 @@ function App() {
               <>
                 <p>Please align the student's face within the oval.</p>
                 <div className="webcam-container">
-                  <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={VIDEO_CONSTRAINTS} />
+                  <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={{ facingMode: "user" }} />
                   <div className="webcam-mask"></div>
                   <div className="webcam-overlay-text">
                     {enrollStep === 'front' && "👤 Look straight into the camera"}
@@ -569,6 +595,22 @@ function App() {
         </div>
       )}
 
+      {/* ---------------- 1-ON-1 VERIFICATION MODAL ---------------- */}
+      {isVerifyModalOpen && verifyingStudent && (
+        <div className="modal-overlay" style={{zIndex: 4000}}>
+          <div className="modal-content">
+            <h2 className="modal-header">Verify Identity</h2>
+            <h3 style={{marginTop: 0, color: '#555'}}>Target Student: {verifyingStudent['Student Name']}</h3>
+            <div className="webcam-container" style={{minHeight: '250px'}}>
+              <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={{ facingMode: "user" }} />
+              <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
+            </div>
+            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
+            <button className="btn-capture" onClick={runVerificationScan}>🔍 Scan Face</button>
+            <button className="btn-cancel" onClick={() => setIsVerifyModalOpen(false)}>Close</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
