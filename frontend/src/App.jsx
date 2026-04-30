@@ -233,20 +233,38 @@ function App() {
       const canvas = canvasRef.current;
       
       if (video.videoWidth > 0 && video.videoHeight > 0) {
+        // Force the canvas resolution to match the video element's CSS size
         canvas.width = video.clientWidth;
         canvas.height = video.clientHeight;
         const ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        const scaleX = video.clientWidth / video.videoWidth;
-        const scaleY = video.clientHeight / video.videoHeight;
+        // 🚀 THE FIX: Calculate invisible "Black Bar" offsets (Letterboxing)
+        const vRatio = video.videoWidth / video.videoHeight;
+        const dRatio = canvas.width / canvas.height;
+        let renderW = canvas.width;
+        let renderH = canvas.height;
+        let offsetX = 0;
+        let offsetY = 0;
+        
+        if (vRatio > dRatio) {
+          renderH = canvas.width / vRatio;
+          offsetY = (canvas.height - renderH) / 2;
+        } else {
+          renderW = canvas.height * vRatio;
+          offsetX = (canvas.width - renderW) / 2;
+        }
+        
+        const scale = renderW / video.videoWidth;
 
         detectedFaces.forEach(face => {
           const[origX, origY, origW, origH] = face.box;
-          const x = origX * scaleX;
-          const y = origY * scaleY;
-          const w = origW * scaleX;
-          const h = origH * scaleY;
+          
+          // Apply exact mathematical offset to stick perfectly to the person!
+          const x = (origX * scale) + offsetX;
+          const y = (origY * scale) + offsetY;
+          const w = origW * scale;
+          const h = origH * scale;
 
           ctx.beginPath();
           ctx.lineWidth = 4;
@@ -302,22 +320,41 @@ function App() {
     const rect = canvas.getBoundingClientRect();
     const video = surveillanceWebcamRef.current.video;
     
-    const scaleX = video.videoWidth / rect.width;
-    const scaleY = video.videoHeight / rect.height;
+    // Reverse-engineer the click coordinates using the same Letterbox Math
+    const vRatio = video.videoWidth / video.videoHeight;
+    const dRatio = rect.width / rect.height;
+    let renderW = rect.width;
+    let renderH = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
     
-    const clickX = (e.clientX - rect.left) * scaleX;
-    const clickY = (e.clientY - rect.top) * scaleY;
+    if (vRatio > dRatio) {
+      renderH = rect.width / vRatio;
+      offsetY = (rect.height - renderH) / 2;
+    } else {
+      renderW = rect.height * vRatio;
+      offsetX = (rect.width - renderW) / 2;
+    }
+    const scale = renderW / video.videoWidth;
+    
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
 
     detectedFaces.forEach(face => {
       const[origX, origY, origW, origH] = face.box;
       
+      const x = (origX * scale) + offsetX;
+      const y = (origY * scale) + offsetY;
+      const w = origW * scale;
+      const h = origH * scale;
+
       // Allow clicking on Unknown (Red) OR Scanning (Yellow) boxes
       if ((face.status === 'unknown' || face.status === 'scanning') && 
-          clickX >= origX && clickX <= origX + origW && 
-          clickY >= origY && clickY <= origY + origH) {
+          clickX >= x && clickX <= x + w && 
+          clickY >= y && clickY <= y + h) {
         
-        // 🚀 THE MAGIC: We use CSS Percentages so the zoom never breaks or crashes!
-        // We target the top 20% of the box (The Face)
+        // 🚀 THE MAGIC: Enter Live Zoom Mode!
+        // Because your backend currently sends BODY boxes, we target the top 20% of the box to zoom on the FACE.
         const originX = ((origX + origW / 2) / video.videoWidth) * 100;
         const originY = ((origY + origH * 0.2) / video.videoHeight) * 100;
 
