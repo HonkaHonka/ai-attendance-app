@@ -11,7 +11,21 @@ const VIDEO_CONSTRAINTS = {
   height: 720,
   facingMode: "user" 
 };
+const getVideoDisplayParams = (video, containerRect) => {
+  if (!video || video.videoWidth === 0 || !containerRect) return null;
+  const videoW = video.videoWidth;
+  const videoH = video.videoHeight;
+  const containerW = containerRect.width;
+  const containerH = containerRect.height;
 
+  const scale = Math.min(containerW / videoW, containerH / videoH);
+  const renderedW = videoW * scale;
+  const renderedH = videoH * scale;
+  const offsetX = (containerW - renderedW) / 2;
+  const offsetY = (containerH - renderedH) / 2;
+
+  return { scale, offsetX, offsetY, renderedW, renderedH };
+};
 function App() {
   const [view, setView] = useState('login'); 
   const[email, setEmail] = useState('');
@@ -228,64 +242,45 @@ function App() {
   
   // 1. Draw Bounding Boxes
   useEffect(() => {
-    if (canvasRef.current && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
-      const video = surveillanceWebcamRef.current.video;
-      const canvas = canvasRef.current;
-      
-      if (video.videoWidth > 0 && video.videoHeight > 0) {
-        // Force the canvas resolution to match the video element's CSS size
-        canvas.width = video.clientWidth;
-        canvas.height = video.clientHeight;
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const canvas = canvasRef.current;
+  const video = surveillanceWebcamRef.current?.video;
+  if (!canvas || !video || video.videoWidth === 0) return;
 
-        // 🚀 THE FIX: Calculate invisible "Black Bar" offsets (Letterboxing)
-        const vRatio = video.videoWidth / video.videoHeight;
-        const dRatio = canvas.width / canvas.height;
-        let renderW = canvas.width;
-        let renderH = canvas.height;
-        let offsetX = 0;
-        let offsetY = 0;
-        
-        if (vRatio > dRatio) {
-          renderH = canvas.width / vRatio;
-          offsetY = (canvas.height - renderH) / 2;
-        } else {
-          renderW = canvas.height * vRatio;
-          offsetX = (canvas.width - renderW) / 2;
-        }
-        
-        const scale = renderW / video.videoWidth;
+  // Get the actual container (parent of canvas) – use its dimensions
+  const containerRect = canvas.parentElement?.getBoundingClientRect();
+  if (!containerRect) return;
 
-        detectedFaces.forEach(face => {
-          const[origX, origY, origW, origH] = face.box;
-          
-          // Apply exact mathematical offset to stick perfectly to the person!
-          const x = (origX * scale) + offsetX;
-          const y = (origY * scale) + offsetY;
-          const w = origW * scale;
-          const h = origH * scale;
+  const params = getVideoDisplayParams(video, containerRect);
+  if (!params) return;
 
-          ctx.beginPath();
-          ctx.lineWidth = 4;
-          
-          if (face.status === 'known') { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
-          else if (face.status === 'scanning') { ctx.strokeStyle = '#ffcb05'; ctx.fillStyle = '#ffcb05'; }
-          else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
-          
-          ctx.rect(x, y, w, h);
-          ctx.stroke();
+  const { scale, offsetX, offsetY } = params;
+  canvas.width = containerRect.width;
+  canvas.height = containerRect.height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-          ctx.font = 'bold 20px Arial';
-          const text = face.name;
-          const textWidth = ctx.measureText(text).width;
-          ctx.fillRect(x, y - 35, textWidth + 20, 35);
-          ctx.fillStyle = '#fff';
-          ctx.fillText(text, x + 10, y - 8);
-        });
-      }
-    }
-  }, [detectedFaces]);
+  detectedFaces.forEach(face => {
+    const [origX, origY, origW, origH] = face.box;
+    const x = origX * scale + offsetX;
+    const y = origY * scale + offsetY;
+    const w = origW * scale;
+    const h = origH * scale;
+
+    ctx.beginPath();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = face.status === 'known' ? '#28a745' : face.status === 'scanning' ? '#ffcb05' : '#dc3545';
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.rect(x, y, w, h);
+    ctx.stroke();
+
+    ctx.font = 'bold 20px Arial';
+    const text = face.name;
+    const textWidth = ctx.measureText(text).width;
+    ctx.fillRect(x, y - 35, textWidth + 20, 35);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, x + 10, y - 8);
+  });
+}, [detectedFaces]);
 
   // 2. Draw the Live Picture-in-Picture (PiP) Window
   useEffect(() => {
@@ -311,60 +306,36 @@ function App() {
   // CLICK LOGIC (TARGET LOCK ZOOM)
   // ==========================================
   const handleCanvasClick = (e) => {
-    // If we are already zoomed in, ignore clicks on the canvas!
-    if (liveZoom) return;
+  if (liveZoom) return;
 
-    const canvas = canvasRef.current;
-    if (!canvas || !surveillanceWebcamRef.current || !surveillanceWebcamRef.current.video) return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const video = surveillanceWebcamRef.current.video;
-    
-    // Reverse-engineer the click coordinates using the same Letterbox Math
-    const vRatio = video.videoWidth / video.videoHeight;
-    const dRatio = rect.width / rect.height;
-    let renderW = rect.width;
-    let renderH = rect.height;
-    let offsetX = 0;
-    let offsetY = 0;
-    
-    if (vRatio > dRatio) {
-      renderH = rect.width / vRatio;
-      offsetY = (rect.height - renderH) / 2;
-    } else {
-      renderW = rect.height * vRatio;
-      offsetX = (rect.width - renderW) / 2;
+  const canvas = canvasRef.current;
+  const video = surveillanceWebcamRef.current?.video;
+  if (!canvas || !video || video.videoWidth === 0) return;
+
+  const containerRect = canvas.getBoundingClientRect();
+  const params = getVideoDisplayParams(video, containerRect);
+  if (!params) return;
+
+  const { scale, offsetX, offsetY } = params;
+  const clickX = e.clientX - containerRect.left;
+  const clickY = e.clientY - containerRect.top;
+
+  detectedFaces.forEach(face => {
+    if (face.status !== 'unknown' && face.status !== 'scanning') return;
+
+    const [origX, origY, origW, origH] = face.box;
+    const x = origX * scale + offsetX;
+    const y = origY * scale + offsetY;
+    const w = origW * scale;
+    const h = origH * scale;
+
+    if (clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
+      const originX = ((origX + origW / 2) / video.videoWidth) * 100;
+      const originY = ((origY + origH / 2) / video.videoHeight) * 100;
+      setLiveZoom({ origBox: face.box, cssOrigin: `${originX}% ${originY}%` });
     }
-    const scale = renderW / video.videoWidth;
-    
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
-
-    detectedFaces.forEach(face => {
-      const[origX, origY, origW, origH] = face.box;
-      
-      const x = (origX * scale) + offsetX;
-      const y = (origY * scale) + offsetY;
-      const w = origW * scale;
-      const h = origH * scale;
-
-      // Allow clicking on Unknown (Red) OR Scanning (Yellow) boxes
-      if ((face.status === 'unknown' || face.status === 'scanning') && 
-          clickX >= x && clickX <= x + w && 
-          clickY >= y && clickY <= y + h) {
-        
-        // 🚀 THE MAGIC: Enter Live Zoom Mode!
-        // Because your backend currently sends BODY boxes, we target the top 20% of the box to zoom on the FACE.
-        const originX = ((origX + origW / 2) / video.videoWidth) * 100;
-        const originY = ((origY + origH / 2) / video.videoHeight) * 100;
-
-        setLiveZoom({
-           origBox: face.box,
-           cssOrigin: `${originX}% ${originY}%`
-        });
-      }
-    });
-  };
+  });
+};
 
   const assignLiveEnroll = async (studentId, studentName) => {
     try {
