@@ -5,7 +5,6 @@ import './App.css';
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
-// We leave out VIDEO_CONSTRAINTS here so the TV uses its native, natural view!
 function App() {
   const[view, setView] = useState('login'); 
   const[email, setEmail] = useState('');
@@ -28,14 +27,14 @@ function App() {
   const[isSurveillanceActive, setIsSurveillanceActive] = useState(false);
   const[detectedFaces, setDetectedFaces] = useState([]);
   
-  // 🚀 NEW: State for our Custom Live Cinematic Zoom
-  const[liveZoomTarget, setLiveZoomTarget] = useState(null); 
+  // Custom Live Cinematic Zoom State
+  const[liveZoom, setLiveZoom] = useState(null); 
   
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
-  const pipCanvasRef = useRef(null); // 🚀 NEW: Ref for the Picture-in-Picture display
+  const pipCanvasRef = useRef(null); 
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -190,7 +189,7 @@ function App() {
           requestAnimationFrame(sendFrameToWebSocket);
         }
       };
-      wsRef.current.onerror = (error) => { stopSurveillance(); };
+      wsRef.current.onerror = () => { stopSurveillance(); };
     }
   };
 
@@ -203,7 +202,6 @@ function App() {
 
   useEffect(() => { return () => stopSurveillance(); },[]);
 
-  // 🚀 DRAW LOOP FOR MAIN CANVAS & PiP CANVAS
   useEffect(() => {
     if (canvasRef.current && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
       const video = surveillanceWebcamRef.current.video;
@@ -243,7 +241,7 @@ function App() {
           ctx.fillText(text, x + 10, y - 8);
         });
 
-        // 🚀 LIVE PiP DRAWING: Draw the raw video onto the small corner window if Zoom is active!
+        // 🚀 LIVE PiP DRAWING
         if (liveZoom && pipCanvasRef.current) {
           const pipCtx = pipCanvasRef.current.getContext('2d');
           pipCanvasRef.current.width = video.videoWidth;
@@ -255,7 +253,6 @@ function App() {
   },[detectedFaces, liveZoom]);
 
   const handleCanvasClick = (e) => {
-    // If we are already zoomed in, ignore clicks on the canvas!
     if (liveZoom) return;
 
     const canvas = canvasRef.current;
@@ -273,15 +270,12 @@ function App() {
     detectedFaces.forEach(face => {
       const[origX, origY, origW, origH] = face.box;
       
-      // Allow clicking on both Unknown (Red) AND Scanning (Yellow) boxes!
       if ((face.status === 'unknown' || face.status === 'scanning') && 
           clickX >= origX && clickX <= origX + origW && 
           clickY >= origY && clickY <= origY + origH) {
         
-        // 🚀 THE MAGIC: Enter Live Zoom Mode!
-        // We calculate the center of the student's chest/face to target the zoom.
         const targetCenterX = (origX + (origW / 2)) * (rect.width / video.videoWidth);
-        const targetCenterY = (origY + (origH * 0.3)) * (rect.height / video.videoHeight); // Target the head/chest
+        const targetCenterY = (origY + (origH * 0.3)) * (rect.height / video.videoHeight); 
 
         setLiveZoom({
            origBox: face.box,
@@ -294,9 +288,11 @@ function App() {
 
   const assignLiveEnroll = async (studentId, studentName) => {
     try {
-      // Grab the high-res screenshot while the video is still playing live
       const liveFrame = surveillanceWebcamRef.current.getScreenshot();
-      
+      const[x, y, w, h] = liveZoom.origBox;
+      const pad = w * 0.3;
+      const expandedBox =[ Math.max(0, x - pad), Math.max(0, y - pad), w + (pad * 2), h + (pad * 2) ];
+
       const response = await fetch(`${API_BASE}/assign-face`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -304,19 +300,17 @@ function App() {
             student_id: String(studentId),
             student_name: studentName,
             image: liveFrame,
-            box: liveZoom.origBox // Python will use the original YOLO coordinates to crop the face
+            box: expandedBox 
           })
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
       
       alert(`✅ Successfully Enrolled ${studentName}!`);
-      setLiveZoom(null); // Zooms out immediately!
+      setLiveZoom(null); 
       
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
-
-  const closeModal = () => setIsModalOpen(false);
 
   return (
     <div>
@@ -413,13 +407,8 @@ function App() {
             
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
-              <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>
-                YOLOv8 + PyTorch crowd tracking. <b>Click on Red (Unknown) boxes</b> to Quick Enroll a student!
-              </p>
-              <button 
-                style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} 
-                onClick={toggleSurveillance}
-              >
+              <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>YOLOv8 + PyTorch crowd tracking. <b>Click on Red (Unknown) boxes</b> to Quick Enroll a student!</p>
+              <button style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} onClick={toggleSurveillance}>
                 ▶ Launch Full-Screen Tracker
               </button>
             </div>
@@ -427,24 +416,17 @@ function App() {
             <div style={{maxWidth: '800px', margin: '0 auto'}}>
               <table>
                 <thead>
-                  <tr>
-                    <th>Student ID</th>
-                    <th>Student Name</th>
-                    <th style={{textAlign: 'center'}}>Attendance Status</th>
-                  </tr>
+                  <tr><th>Student ID</th><th>Student Name</th><th style={{textAlign: 'center'}}>Attendance Status</th></tr>
                 </thead>
                 <tbody>
                   {students.map((student, idx) => {
                     const status = attendanceRecords[student['Student ID']];
                     return (
                       <tr key={idx}>
-                        <td>{student['Student ID']}</td>
-                        <td>{student['Student Name']}</td>
+                        <td>{student['Student ID']}</td><td>{student['Student Name']}</td>
                         <td style={{textAlign: 'center'}}>
                           {status === 'present' ? (
-                            <span style={{ color: 'white', background: '#28a745', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>
-                              ✅ Present
-                            </span>
+                            <span style={{ color: 'white', background: '#28a745', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>✅ Present</span>
                           ) : (
                             <button 
                               style={{ padding: '6px 12px', backgroundColor: status === 'failed' ? '#dc3545' : '#e9ecef', color: status === 'failed' ? 'white' : '#333', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', width: '150px' }}
@@ -464,46 +446,30 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- NEW: FULL-SCREEN SURVEILLANCE OVERLAY WITH LIVE ZOOM ---------------- */}
+      {/* ---------------- FULL-SCREEN SURVEILLANCE OVERLAY ---------------- */}
       {isSurveillanceActive && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           
           <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
             <h2 style={{ margin: 0, color: 'var(--accent-gold)' }}>🔴 Live Classroom Tracking</h2>
-            <button 
-              onClick={stopSurveillance} 
-              style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
+            <button onClick={stopSurveillance} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
               Close Tracker
             </button>
           </div>
 
           <div style={{ flex: 1, position: 'relative', background: '#000', overflow: 'hidden' }}>
-            
-            {/* 🚀 THE MAGIC ZOOM WRAPPER */}
             <div style={{ 
               position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
               transform: liveZoom ? `scale(2.5) translate(calc(20% - ${liveZoom.centerX}px/2.5), calc(50% - ${liveZoom.centerY}px/2.5))` : 'scale(1) translate(0px, 0px)',
               transformOrigin: liveZoom ? `${liveZoom.centerX}px ${liveZoom.centerY}px` : 'center center',
               transition: 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)'
             }}>
-              <Webcam 
-                ref={surveillanceWebcamRef} 
-                audio={false} 
-                mirrored={false} 
-                screenshotFormat="image/jpeg" 
-                style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain', position: 'absolute' }}
-              />
-              <canvas 
-                ref={canvasRef} 
-                onClick={handleCanvasClick} 
-                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: liveZoom ? 'default' : 'crosshair' }} 
-              />
+              <Webcam ref={surveillanceWebcamRef} audio={false} mirrored={false} screenshotFormat="image/jpeg" style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain', position: 'absolute' }} />
+              <canvas ref={canvasRef} onClick={handleCanvasClick} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: liveZoom ? 'default' : 'crosshair' }} />
             </div>
 
-            {/* 🚀 THE PICTURE-IN-PICTURE (PiP) AND SIDE PANEL */}
             {liveZoom && (
               <>
-                {/* Top Right PiP Frame */}
                 <div 
                   onClick={() => setLiveZoom(null)} 
                   style={{
@@ -518,7 +484,6 @@ function App() {
                   </div>
                 </div>
 
-                {/* Right Side Assignment Panel */}
                 <div style={{ 
                   position: 'absolute', right: 0, top: 0, width: '400px', height: '100%', 
                   background: 'rgba(20,20,30,0.95)', zIndex: 4000, padding: '20px', 
@@ -526,9 +491,7 @@ function App() {
                   boxShadow: '-10px 0 30px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column'
                 }}>
                   <h2 style={{color: 'white', marginTop: 0}}>⚡ Live Enroll</h2>
-                  <p style={{color: '#aaa', fontSize: '14px', marginBottom: '20px'}}>
-                    Camera is live. Wait until the student looks forward, then click their name.
-                  </p>
+                  <p style={{color: '#aaa', fontSize: '14px', marginBottom: '20px'}}>Camera is live. Wait until the student looks at the camera, then click their name below to instantly capture their DNA.</p>
 
                   <div className="student-select-list" style={{flex: 1, border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c', overflowY: 'auto', padding: '10px'}}>
                     {students.map((student, idx) => (
@@ -549,7 +512,7 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
+      {/* ---------------- ENROLLMENT MODAL ---------------- */}
       {isModalOpen && (
         <div className="modal-overlay">
           <div className="modal-content">
