@@ -5,9 +5,9 @@ import './App.css';
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
+// 🚀 FIX 1: We REMOVED width and height! 
+// This forces the 4K TV camera to give us the full, un-zoomed wide room!
 const VIDEO_CONSTRAINTS = {
-  width: 1280,
-  height: 720,
   facingMode: "user" 
 };
 
@@ -38,7 +38,7 @@ function App() {
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
-  const zoomCanvasRef = useRef(null); // Reference for the new Zoom Canvas
+  const zoomCanvasRef = useRef(null); 
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -200,6 +200,9 @@ function App() {
 
   useEffect(() => { return () => stopSurveillance(); },[]);
 
+  // ==========================================
+  // 🚀 FIX 2: PERFECT LETTERBOX MATH FOR DRAWING
+  // ==========================================
   useEffect(() => {
     if (canvasRef.current && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
       const video = surveillanceWebcamRef.current.video;
@@ -211,15 +214,32 @@ function App() {
         const ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        const scaleX = video.clientWidth / video.videoWidth;
-        const scaleY = video.clientHeight / video.videoHeight;
+        // Letterbox calculation to perfectly align the TV black bars!
+        const vRatio = video.videoWidth / video.videoHeight;
+        const dRatio = canvas.width / canvas.height;
+        let renderW = canvas.width;
+        let renderH = canvas.height;
+        let offsetX = 0;
+        let offsetY = 0;
+        
+        if (vRatio > dRatio) {
+          renderH = canvas.width / vRatio;
+          offsetY = (canvas.height - renderH) / 2;
+        } else {
+          renderW = canvas.height * vRatio;
+          offsetX = (canvas.width - renderW) / 2;
+        }
+        
+        const scale = renderW / video.videoWidth;
 
         detectedFaces.forEach(face => {
           const[origX, origY, origW, origH] = face.box;
-          const x = origX * scaleX;
-          const y = origY * scaleY;
-          const w = origW * scaleX;
-          const h = origH * scaleY;
+          
+          // The math perfectly aligns the box over the student
+          const x = (origX * scale) + offsetX;
+          const y = (origY * scale) + offsetY;
+          const w = origW * scale;
+          const h = origH * scale;
 
           ctx.beginPath();
           ctx.lineWidth = 4;
@@ -242,35 +262,58 @@ function App() {
     }
   },[detectedFaces]);
 
+  // ==========================================
+  // 🚀 FIX 3: PERFECT LETTERBOX MATH FOR CLICKING
+  // ==========================================
   const handleCanvasClick = (e) => {
     const canvas = canvasRef.current;
     if (!canvas || !surveillanceWebcamRef.current || !surveillanceWebcamRef.current.video) return;
     
     const rect = canvas.getBoundingClientRect();
     const video = surveillanceWebcamRef.current.video;
-    const scaleX = video.videoWidth / rect.width;
-    const scaleY = video.videoHeight / rect.height;
     
-    const clickX = (e.clientX - rect.left) * scaleX;
-    const clickY = (e.clientY - rect.top) * scaleY;
+    const vRatio = video.videoWidth / video.videoHeight;
+    const dRatio = rect.width / rect.height;
+    let renderW = rect.width;
+    let renderH = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+    
+    if (vRatio > dRatio) {
+      renderH = rect.width / vRatio;
+      offsetY = (rect.height - renderH) / 2;
+    } else {
+      renderW = rect.height * vRatio;
+      offsetX = (rect.width - renderW) / 2;
+    }
+    const scale = renderW / video.videoWidth;
+    
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
 
     detectedFaces.forEach(face => {
       const[origX, origY, origW, origH] = face.box;
       
+      const x = (origX * scale) + offsetX;
+      const y = (origY * scale) + offsetY;
+      const w = origW * scale;
+      const h = origH * scale;
+
+      // Allow clicking on both Unknown AND Scanning boxes
       if ((face.status === 'unknown' || face.status === 'scanning') && 
-          clickX >= origX && clickX <= origX + origW && 
-          clickY >= origY && clickY <= origY + origH) {
+          clickX >= x && clickX <= x + w && 
+          clickY >= y && clickY <= y + h) {
         
-        // 🚀 THE FIX: We capture the frame, STOP the live feed, and open the Zoom Modal!
         const frame = surveillanceWebcamRef.current.getScreenshot();
         setQuickEnrollData({ image: frame, box: face.box });
-        stopSurveillance(); // Pauses the background chaos while the teacher assigns the name
+        stopSurveillance(); // Pauses the background feed
       }
     });
   };
 
-  // 🚀 NEW: This effect handles drawing the "Digital Zoom" on the popup canvas
-  // --- UPGRADED: DIGITAL ZOOM "PORTRAIT" EFFECT ---
+  // ==========================================
+  // DIGITAL ZOOM PORTRAIT (Target Locked)
+  // ==========================================
   useEffect(() => {
     if (quickEnrollData && zoomCanvasRef.current) {
       const img = new Image();
@@ -278,21 +321,17 @@ function App() {
         const ctx = zoomCanvasRef.current.getContext('2d');
         const[x, y, w, h] = quickEnrollData.box;
         
-        // 🚀 FIX: Instead of a tight face crop, we take a wider "Head & Shoulders" portrait.
-        // This prevents the image from over-stretching and looking heavily pixelated!
-        const padX = w * 0.6; // Take 60% more space on the sides
-        const padY = h * 0.4; // Take 40% more space on top/bottom
+        // Calculate a wider "Head & Shoulders" portrait to avoid pixelation
+        const padX = w * 0.6; 
+        const padY = h * 0.4; 
         
         const sx = Math.max(0, x - padX);
         const sy = Math.max(0, y - padY);
         const sw = Math.min(img.width - sx, w + (padX * 2));
-        const sh = Math.min(img.height - sy, h + (padY * 2)); // Crop down to mid-chest
+        const sh = Math.min(img.height - sy, h + (padY * 2)); 
 
-        // 🚀 FIX: Turn on Canvas High-Quality Anti-Aliasing (Smoothing)
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
-
-        // Draw it into the 400x400 circular canvas
         ctx.clearRect(0, 0, 400, 400);
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 400, 400);
       };
@@ -317,7 +356,7 @@ function App() {
       
       alert(`✅ Successfully Enrolled!`);
       setQuickEnrollData(null); 
-      toggleSurveillance(); // 🚀 Restart the live feed instantly after saving!
+      toggleSurveillance(); 
       
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
@@ -417,7 +456,7 @@ function App() {
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
               <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>
-                Launch the Full-Screen AI Tracker to automatically mark student attendance.
+                YOLOv8 + PyTorch crowd tracking. <b>Click on Red (Unknown) boxes</b> to Quick Enroll a student!
               </p>
               <button 
                 style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} 
@@ -445,9 +484,7 @@ function App() {
                         <td>{student['Student Name']}</td>
                         <td style={{textAlign: 'center'}}>
                           {status === 'present' ? (
-                            <span style={{ color: 'white', background: '#28a745', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>
-                              ✅ Present
-                            </span>
+                            <span style={{ color: 'white', background: '#28a745', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>✅ Present</span>
                           ) : (
                             <button 
                               style={{ padding: '6px 12px', backgroundColor: status === 'failed' ? '#dc3545' : '#e9ecef', color: status === 'failed' ? 'white' : '#333', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', width: '150px' }}
@@ -469,9 +506,9 @@ function App() {
 
       {/* ---------------- FULL-SCREEN SURVEILLANCE OVERLAY ---------------- */}
       {isSurveillanceActive && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           
-          <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
             <h2 style={{ margin: 0, color: 'var(--accent-gold)' }}>🔴 Live Classroom Tracking</h2>
             <button 
               onClick={stopSurveillance} 
@@ -480,7 +517,7 @@ function App() {
             </button>
           </div>
 
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
+          <div style={{ flex: 1, position: 'relative', background: '#000', overflow: 'hidden' }}>
             <div style={{ position: 'relative', aspectRatio: '16/9', maxHeight: '100%', maxWidth: '100%' }}>
               <Webcam 
                 ref={surveillanceWebcamRef} 
