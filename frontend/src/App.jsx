@@ -5,7 +5,6 @@ import './App.css';
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
-// 🚀 MANDATORY: Guarantees the AI receives high-quality frames and disables TV hardware auto-zoom!
 const VIDEO_CONSTRAINTS = {
   width: 1280,
   height: 720,
@@ -14,16 +13,16 @@ const VIDEO_CONSTRAINTS = {
 
 function App() {
   const [view, setView] = useState('login'); 
-  const [email, setEmail] = useState('');
+  const[email, setEmail] = useState('');
   const [facultyName, setFacultyName] = useState('');
-  const [classes, setClasses] = useState([]);
+  const[classes, setClasses] = useState([]);
   const [students, setStudents] = useState([]);
-  const [selectedClass, setSelectedClass] = useState('');
+  const[selectedClass, setSelectedClass] = useState('');
   const [error, setError] = useState('');
 
   const[isModalOpen, setIsModalOpen] = useState(false);
   const [enrollStep, setEnrollStep] = useState(''); 
-  const [capturedImages, setCapturedImages] = useState({});
+  const[capturedImages, setCapturedImages] = useState({});
   const [isCapturing, setIsCapturing] = useState(false); 
   
   const [isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
@@ -32,18 +31,16 @@ function App() {
   const [attendanceRecords, setAttendanceRecords] = useState({}); 
 
   const[isSurveillanceActive, setIsSurveillanceActive] = useState(false);
-  const [detectedFaces, setDetectedFaces] = useState([]);
-  const [quickEnrollData, setQuickEnrollData] = useState(null); 
+  const[detectedFaces, setDetectedFaces] = useState([]);
   
-  // 🚀 CINEMATIC ZOOM STATE
-  const [liveZoom, setLiveZoom] = useState(null); 
+  // 🚀 REPLACED: Removed quickEnrollData (the static crop), added liveZoom (from V2)
+  const[liveZoom, setLiveZoom] = useState(null); 
   
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
-  const zoomCanvasRef = useRef(null);
-  const pipCanvasRef = useRef(null); 
+  const pipCanvasRef = useRef(null); // 🚀 NEW: Reference for the Picture-in-Picture window
 
   // ==========================================
   // API CALLS
@@ -102,6 +99,9 @@ function App() {
     } catch (error) { alert(`Error downloading report: ${error.message}`); }
   };
 
+  // ==========================================
+  // STANDARD ENROLLMENT (9-IMAGES)
+  // ==========================================
   const startEnrollment = async (classNbr) => {
     setSelectedClass(classNbr);
     setCapturedImages({});
@@ -142,6 +142,9 @@ function App() {
     }
   };
 
+  // ==========================================
+  // 1-ON-1 VERIFICATION SCAN
+  // ==========================================
   const runVerificationScan = async () => {
     setVerifyResult('Scanning...');
     const imageSrc = webcamRef.current.getScreenshot();
@@ -159,11 +162,14 @@ function App() {
         setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
       } else {
         setVerifyResult(`❌ Face Not Recognized in Database.`);
-        setAttendanceRecords(prev => ({ ...prev,[verifyingStudent['Student ID']]: 'failed' }));
+        setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
       }
     } catch (error) { setVerifyResult(`⚠️ Error: ${error.message}`); }
   };
 
+  // ==========================================
+  // LIVE WEBSOCKET SURVEILLANCE
+  // ==========================================
   const sendFrameToWebSocket = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && surveillanceWebcamRef.current) {
       const imageSrc = surveillanceWebcamRef.current.getScreenshot();
@@ -211,13 +217,12 @@ function App() {
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     setDetectedFaces([]);
     setLiveZoom(null);
-    setQuickEnrollData(null);
   };
 
   useEffect(() => { return () => stopSurveillance(); },[]);
 
   // ==========================================
-  // 🚀 RESTORED: PERFECT ZERO-MATH DRAWING FROM VERSION 1
+  // 🚀 DRAWING MATH (UNCHANGED FROM V1)
   // ==========================================
   useEffect(() => {
     if (canvasRef.current && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
@@ -262,7 +267,7 @@ function App() {
   }, [detectedFaces]);
 
   // ==========================================
-  // 🚀 RESTORED: PiP (PICTURE-IN-PICTURE) FROM VERSION 2
+  // 🚀 LIVE PICTURE-IN-PICTURE DRAWING (FROM V2)
   // ==========================================
   useEffect(() => {
     let animId;
@@ -283,12 +288,11 @@ function App() {
     return () => cancelAnimationFrame(animId);
   }, [liveZoom]);
 
-
   // ==========================================
-  // 🚀 MERGED: FLAWLESS CLICK MATH (V1) + LIVE ZOOM UI (V2)
+  // 🚀 CLICK LOGIC (UNCHANGED FROM V1) + ZOOM TRIGGER
   // ==========================================
   const handleCanvasClick = (e) => {
-    if (liveZoom) return;
+    if (liveZoom) return; // Prevent clicking while already zoomed in
 
     const canvas = canvasRef.current;
     if (!canvas || !surveillanceWebcamRef.current || !surveillanceWebcamRef.current.video) return;
@@ -305,7 +309,6 @@ function App() {
     detectedFaces.forEach(face => {
       const[origX, origY, origW, origH] = face.box;
       
-      // Allow clicking on Unknown (Red) OR Scanning (Yellow) boxes
       if ((face.status === 'unknown' || face.status === 'scanning') && 
           clickX >= origX && clickX <= origX + origW && 
           clickY >= origY && clickY <= origY + origH) {
@@ -318,49 +321,19 @@ function App() {
            origBox: face.box,
            cssOrigin: `${originX}% ${originY}%`
         });
-        
-        const frame = surveillanceWebcamRef.current.getScreenshot();
-        setQuickEnrollData({ image: frame, box: face.box });
       }
     });
   };
 
   // ==========================================
-  // 🚀 THE DIGITAL PORTRAIT FIX (ID Badge style)
+  // 🚀 LIVE ENROLL ASSIGNMENT (FROM V2)
   // ==========================================
-  useEffect(() => {
-    if (quickEnrollData && zoomCanvasRef.current) {
-      const img = new Image();
-      img.onload = () => {
-        const ctx = zoomCanvasRef.current.getContext('2d');
-        const[x, y, w, h] = quickEnrollData.box;
-        
-        // We know Python is already sending a tight face box.
-        // We just add a slight 30% padding so it looks like a nice ID portrait,
-        // preventing the "full body" squeeze!
-        const padX = w * 0.3; 
-        const padY = h * 0.3; 
-        
-        const sx = Math.max(0, x - padX);
-        const sy = Math.max(0, y - padY);
-        const sw = Math.min(img.width - sx, w + (padX * 2));
-        const sh = Math.min(img.height - sy, h + (padY * 2));
-
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.clearRect(0, 0, 400, 400);
-        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 400, 400);
-      };
-      img.src = quickEnrollData.image;
-    }
-  },[quickEnrollData]);
-
   const assignLiveEnroll = async (studentId, studentName) => {
     try {
       const liveFrame = surveillanceWebcamRef.current.getScreenshot();
       const[x, y, w, h] = liveZoom.origBox;
       
-      const pad = w * 0.2;
+      const pad = w * 0.3;
       const expandedBox =[ Math.max(0, x - pad), Math.max(0, y - pad), w + (pad * 2), h + (pad * 2) ];
 
       const response = await fetch(`${API_BASE}/assign-face`, {
@@ -376,9 +349,8 @@ function App() {
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
       
-      alert(`✅ Successfully Enrolled!`);
-      setLiveZoom(null); 
-      setQuickEnrollData(null);
+      alert(`✅ Successfully Enrolled ${studentName}!`);
+      setLiveZoom(null); // Instantly zoom back out!
       
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
@@ -416,6 +388,7 @@ function App() {
           <div className="content-box">
             <h2 className="section-title">Faculty Dashboard</h2>
             <h3 style={{color: '#555', marginTop: 0}}>Welcome, {facultyName}</h3>
+            <p>Select an action below to manage student enrollment and attendance.</p>
             <div style={{overflowX: 'auto'}}>
               <table>
                 <thead>
@@ -508,20 +481,21 @@ function App() {
             </button>
           </div>
 
-          <div style={{ flex: 1, position: 'relative', background: '#000', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          {/* EXACT V1 HTML STRUCTURE FOR PERFECT BOX ALIGNMENT */}
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
             <div style={{ 
-              position: 'relative', width: '100%', maxHeight: '100%', aspectRatio: '16/9', display: 'flex', justifyContent: 'center',
-              transform: liveZoom ? `scale(2.5)` : 'scale(1)',
+              position: 'relative', aspectRatio: '16/9', maxHeight: '100%', maxWidth: '100%',
+              transform: liveZoom ? `scale(3.5)` : 'scale(1)',
               transformOrigin: liveZoom ? liveZoom.cssOrigin : 'center center',
               transition: 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)'
-             }}>
+            }}>
               <Webcam 
                 ref={surveillanceWebcamRef} 
                 audio={false} 
                 mirrored={false} 
                 screenshotFormat="image/jpeg" 
                 videoConstraints={VIDEO_CONSTRAINTS} 
-                style={{ width: '100%', height: 'auto', display: 'block' }}
+                style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
               />
               <canvas 
                 ref={canvasRef} 
@@ -530,11 +504,12 @@ function App() {
               />
             </div>
 
-            {/* 🚀 THE PICTURE-IN-PICTURE & SIDE PANEL */}
+            {/* 🚀 THE PICTURE-IN-PICTURE & SIDE PANEL (FROM V2) */}
             {liveZoom && (
               <>
+                {/* Top Left PiP Frame (Click to Cancel) */}
                 <div 
-                  onClick={() => { setLiveZoom(null); setQuickEnrollData(null); }} 
+                  onClick={() => setLiveZoom(null)} 
                   style={{
                     position: 'absolute', top: '20px', left: '20px', width: '320px', height: '180px', 
                     border: '3px solid white', borderRadius: '8px', overflow: 'hidden',
@@ -547,6 +522,7 @@ function App() {
                   </div>
                 </div>
 
+                {/* Right Side Assignment Panel */}
                 <div style={{ 
                   position: 'absolute', right: 0, top: 0, width: '400px', height: '100%', 
                   background: 'rgba(20,20,30,0.95)', zIndex: 4000, padding: '20px', 
@@ -563,7 +539,7 @@ function App() {
                       </div>
                     ))}
                   </div>
-                  <button className="btn-cancel" style={{width: '100%', marginTop: '20px', padding: '15px'}} onClick={() => { setLiveZoom(null); setQuickEnrollData(null); }}>
+                  <button className="btn-cancel" style={{width: '100%', marginTop: '20px', padding: '15px'}} onClick={() => setLiveZoom(null)}>
                     Cancel & Zoom Out
                   </button>
                 </div>
@@ -573,9 +549,9 @@ function App() {
         </div>
       )}
 
-      {/* ---------------- ENROLLMENT MODAL ---------------- */}
+      {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
       {isModalOpen && (
-        <div className="modal-overlay" style={{zIndex: 4000}}>
+        <div className="modal-overlay">
           <div className="modal-content">
             <h2 className="modal-header">Biometric Enrollment</h2>
             {(enrollStep === 'front' || enrollStep === 'left' || enrollStep === 'right') && (
@@ -634,6 +610,7 @@ function App() {
           </div>
         </div>
       )}
+
     </div>
   );
 }
