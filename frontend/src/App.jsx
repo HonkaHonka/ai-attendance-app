@@ -8,41 +8,38 @@ const WS_BASE = "ws://127.0.0.1:8000/ws";
 const VIDEO_CONSTRAINTS = {
   width: 1280,
   height: 720,
-  facingMode: "user"
+  facingMode: "user" 
 };
 
 function App() {
-  const [view, setView] = useState('login');
-  const [email, setEmail] = useState('');
-  const [facultyName, setFacultyName] = useState('');
-  const [classes, setClasses] = useState([]);
-  const [students, setStudents] = useState([]);
-  const [selectedClass, setSelectedClass] = useState('');
-  const [error, setError] = useState('');
+  const[view, setView] = useState('login'); 
+  const[email, setEmail] = useState('');
+  const[facultyName, setFacultyName] = useState('');
+  const[classes, setClasses] = useState([]);
+  const[students, setStudents] = useState([]);
+  const[selectedClass, setSelectedClass] = useState('');
+  const[error, setError] = useState('');
 
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [enrollStep, setEnrollStep] = useState('');
+  const[isModalOpen, setIsModalOpen] = useState(false);
+  const[enrollStep, setEnrollStep] = useState(''); 
   const [capturedImages, setCapturedImages] = useState({});
-  const [isCapturing, setIsCapturing] = useState(false);
+  const[isCapturing, setIsCapturing] = useState(false); 
+  
+  const[isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
+  const[verifyResult, setVerifyResult] = useState('');
+  const[verifyingStudent, setVerifyingStudent] = useState(null); 
+  const[attendanceRecords, setAttendanceRecords] = useState({}); 
 
-  const [isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
-  const [verifyResult, setVerifyResult] = useState('');
-  const [verifyingStudent, setVerifyingStudent] = useState(null);
-  const [attendanceRecords, setAttendanceRecords] = useState({});
-
-  const [isSurveillanceActive, setIsSurveillanceActive] = useState(false);
-  const [detectedFaces, setDetectedFaces] = useState([]);
-  const [quickEnrollData, setQuickEnrollData] = useState(null);
-  const [liveZoom, setLiveZoom] = useState(null); // { origBox, cssOrigin }
-
+  const[isSurveillanceActive, setIsSurveillanceActive] = useState(false);
+  const[detectedFaces, setDetectedFaces] = useState([]);
+  const[quickEnrollData, setQuickEnrollData] = useState(null); 
+  
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
-  const surveillanceWebcamRef = useRef(null);
-  const zoomCanvasRef = useRef(null);       // for the zoom popup (old quick enroll)
-  const pipCanvasRef = useRef(null);        // for PiP during live zoom
+  const surveillanceWebcamRef = useRef(null); 
+  const zoomCanvasRef = useRef(null); // Reference for the new Zoom Canvas
 
-  // ---------- API: LOGIN, CLASSES, STUDENTS ----------
   const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
@@ -60,8 +57,8 @@ function App() {
       const res = await fetch(`${API_BASE}/classes?email=${encodeURIComponent(userEmail)}`);
       const data = await res.json();
       setClasses(data);
-      setView('classes');
-      stopSurveillance();
+      setView('classes'); 
+      stopSurveillance(); 
     } catch (err) { alert("Error loading classes"); }
   };
 
@@ -71,7 +68,7 @@ function App() {
       const data = await res.json();
       setStudents(data);
       setSelectedClass(classNbr);
-      setAttendanceRecords({});
+      setAttendanceRecords({}); 
       setView('students');
     } catch (err) { alert("Error loading students"); }
   };
@@ -97,12 +94,11 @@ function App() {
     } catch (error) { alert(`Error downloading report: ${error.message}`); }
   };
 
-  // ---------- STANDARD ENROLLMENT (9 images) ----------
   const startEnrollment = async (classNbr) => {
     setSelectedClass(classNbr);
     setCapturedImages({});
-    setEnrollStep('front');
-    setIsModalOpen(true);
+    setEnrollStep('front'); 
+    setIsModalOpen(true); 
     try {
       const res = await fetch(`${API_BASE}/students?email=${encodeURIComponent(email)}&class_nbr=${classNbr}`);
       setStudents(await res.json());
@@ -111,14 +107,14 @@ function App() {
 
   const captureBurst = async () => {
     setIsCapturing(true);
-    const frames = [];
+    const frames =[];
     for (let i = 0; i < 3; i++) {
       const imageSrc = webcamRef.current.getScreenshot();
       if (imageSrc) frames.push(imageSrc);
       await new Promise(resolve => setTimeout(resolve, 300));
     }
-    if (enrollStep === 'front') { setCapturedImages({ ...capturedImages, front: frames }); setEnrollStep('left'); }
-    else if (enrollStep === 'left') { setCapturedImages({ ...capturedImages, left: frames }); setEnrollStep('right'); }
+    if (enrollStep === 'front') { setCapturedImages({ ...capturedImages, front: frames }); setEnrollStep('left'); } 
+    else if (enrollStep === 'left') { setCapturedImages({ ...capturedImages, left: frames }); setEnrollStep('right'); } 
     else if (enrollStep === 'right') { setCapturedImages({ ...capturedImages, right: frames }); setEnrollStep('select_student'); }
     setIsCapturing(false);
   };
@@ -131,14 +127,13 @@ function App() {
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || "Failed to process face");
       alert(`✅ ${result.message}`);
-      setIsModalOpen(false);
+      setIsModalOpen(false); 
     } catch (error) {
       alert(`❌ AI Error: ${error.message}`);
-      setEnrollStep('select_student');
+      setEnrollStep('select_student'); 
     }
   };
 
-  // ---------- 1:1 VERIFICATION ----------
   const runVerificationScan = async () => {
     setVerifyResult('Scanning...');
     const imageSrc = webcamRef.current.getScreenshot();
@@ -146,10 +141,10 @@ function App() {
       const response = await fetch(`${API_BASE}/verify-face`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: imageSrc }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
-
+      
       if (result.match && result.name === verifyingStudent['Student Name']) {
         setVerifyResult(`✅ Identity Verified: ${result.name}`);
-        setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'present' }));
+        setAttendanceRecords(prev => ({ ...prev,[verifyingStudent['Student ID']]: 'present' }));
         setTimeout(() => { setIsVerifyModalOpen(false); }, 1500);
       } else if (result.match) {
         setVerifyResult(`❌ Mismatch! That face belongs to: ${result.name}`);
@@ -161,7 +156,6 @@ function App() {
     } catch (error) { setVerifyResult(`⚠️ Error: ${error.message}`); }
   };
 
-  // ---------- WEBSOCKET LIVE SURVEILLANCE ----------
   const sendFrameToWebSocket = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && surveillanceWebcamRef.current) {
       const imageSrc = surveillanceWebcamRef.current.getScreenshot();
@@ -202,158 +196,134 @@ function App() {
     setIsSurveillanceActive(false);
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     setDetectedFaces([]);
-    setLiveZoom(null);
-    setQuickEnrollData(null);
   };
 
-  useEffect(() => { return () => stopSurveillance(); }, []);
+  useEffect(() => { return () => stopSurveillance(); },[]);
 
-  // ---------- DRAW BOUNDING BOXES (STABLE v2 METHOD) ----------
   useEffect(() => {
-    const canvas = canvasRef.current;
-    const video = surveillanceWebcamRef.current?.video;
-    if (!canvas || !video || video.videoWidth === 0) return;
+    if (canvasRef.current && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
+      const video = surveillanceWebcamRef.current.video;
+      const canvas = canvasRef.current;
+      
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        canvas.width = video.clientWidth;
+        canvas.height = video.clientHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Match canvas resolution to the displayed video element size
-    canvas.width = video.clientWidth;
-    canvas.height = video.clientHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const scaleX = video.clientWidth / video.videoWidth;
+        const scaleY = video.clientHeight / video.videoHeight;
 
-    const scaleX = canvas.width / video.videoWidth;
-    const scaleY = canvas.height / video.videoHeight;
+        detectedFaces.forEach(face => {
+          const[origX, origY, origW, origH] = face.box;
+          const x = origX * scaleX;
+          const y = origY * scaleY;
+          const w = origW * scaleX;
+          const h = origH * scaleY;
 
-    detectedFaces.forEach(face => {
-      const [origX, origY, origW, origH] = face.box;
-      const x = origX * scaleX;
-      const y = origY * scaleY;
-      const w = origW * scaleX;
-      const h = origH * scaleY;
+          ctx.beginPath();
+          ctx.lineWidth = 4;
+          
+          if (face.status === 'known') { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
+          else if (face.status === 'scanning') { ctx.strokeStyle = '#ffcb05'; ctx.fillStyle = '#ffcb05'; }
+          else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
+          
+          ctx.rect(x, y, w, h);
+          ctx.stroke();
 
-      ctx.beginPath();
-      ctx.lineWidth = 4;
-      if (face.status === 'known') { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; }
-      else if (face.status === 'scanning') { ctx.strokeStyle = '#ffcb05'; ctx.fillStyle = '#ffcb05'; }
-      else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
-
-      ctx.rect(x, y, w, h);
-      ctx.stroke();
-
-      ctx.font = 'bold 20px Arial';
-      const text = face.name;
-      const textWidth = ctx.measureText(text).width;
-      ctx.fillRect(x, y - 35, textWidth + 20, 35);
-      ctx.fillStyle = '#fff';
-      ctx.fillText(text, x + 10, y - 8);
-    });
-  }, [detectedFaces]);
-
-  // ---------- PICTURE-IN-PICTURE (LIVE ZOOM OVERLAY) ----------
-  useEffect(() => {
-    let animId;
-    const drawPiP = () => {
-      if (liveZoom && pipCanvasRef.current && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
-        const video = surveillanceWebcamRef.current.video;
-        const ctx = pipCanvasRef.current.getContext('2d');
-        if (video.readyState === 4 && video.videoWidth > 0) {
-          pipCanvasRef.current.width = video.videoWidth;
-          pipCanvasRef.current.height = video.videoHeight;
-          ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
-        }
+          ctx.font = 'bold 20px Arial';
+          const text = face.name;
+          const textWidth = ctx.measureText(text).width;
+          ctx.fillRect(x, y - 35, textWidth + 20, 35);
+          ctx.fillStyle = '#fff';
+          ctx.fillText(text, x + 10, y - 8);
+        });
       }
-      animId = requestAnimationFrame(drawPiP);
-    };
-    drawPiP();
-    return () => cancelAnimationFrame(animId);
-  }, [liveZoom]);
+    }
+  },[detectedFaces]);
 
-  // ---------- CLICK on CANVAS -> ENTER LIVE ZOOM (using stable mapping) ----------
   const handleCanvasClick = (e) => {
-    if (liveZoom) return; // already zoomed, ignore
-
     const canvas = canvasRef.current;
-    const video = surveillanceWebcamRef.current?.video;
-    if (!canvas || !video || video.videoWidth === 0) return;
-
+    if (!canvas || !surveillanceWebcamRef.current || !surveillanceWebcamRef.current.video) return;
+    
     const rect = canvas.getBoundingClientRect();
-    // click coordinates relative to canvas element
-    let clickX = e.clientX - rect.left;
-    let clickY = e.clientY - rect.top;
-
-    // map to video pixel coordinates
-    const scaleToVideoX = video.videoWidth / canvas.width;
-    const scaleToVideoY = video.videoHeight / canvas.height;
-    const videoX = clickX * scaleToVideoX;
-    const videoY = clickY * scaleToVideoY;
+    const video = surveillanceWebcamRef.current.video;
+    const scaleX = video.videoWidth / rect.width;
+    const scaleY = video.videoHeight / rect.height;
+    
+    const clickX = (e.clientX - rect.left) * scaleX;
+    const clickY = (e.clientY - rect.top) * scaleY;
 
     detectedFaces.forEach(face => {
-      if (face.status !== 'unknown' && face.status !== 'scanning') return;
-      const [origX, origY, origW, origH] = face.box;
-      if (videoX >= origX && videoX <= origX + origW && videoY >= origY && videoY <= origY + origH) {
-        const originX = ((origX + origW / 2) / video.videoWidth) * 100;
-        const originY = ((origY + origH / 2) / video.videoHeight) * 100;
-        setLiveZoom({ origBox: face.box, cssOrigin: `${originX}% ${originY}%` });
+      const[origX, origY, origW, origH] = face.box;
+      
+      if ((face.status === 'unknown' || face.status === 'scanning') && 
+          clickX >= origX && clickX <= origX + origW && 
+          clickY >= origY && clickY <= origY + origH) {
+        
+        // 🚀 THE FIX: We capture the frame, STOP the live feed, and open the Zoom Modal!
+        const frame = surveillanceWebcamRef.current.getScreenshot();
+        setQuickEnrollData({ image: frame, box: face.box });
+        stopSurveillance(); // Pauses the background chaos while the teacher assigns the name
       }
     });
   };
 
-  // ---------- LIVE ENROLLMENT FROM ZOOM MODE ----------
-  const assignLiveEnroll = async (studentId, studentName) => {
-    try {
-      const liveFrame = surveillanceWebcamRef.current.getScreenshot();
-      if (!liveFrame) throw new Error("Could not capture frame");
-      // Expand the original box slightly to include more context
-      const [x, y, w, h] = liveZoom.origBox;
-      const pad = w * 0.3;
-      const expandedBox = [Math.max(0, x - pad), Math.max(0, y - pad), w + (pad * 2), h + (pad * 2)];
+  // 🚀 NEW: This effect handles drawing the "Digital Zoom" on the popup canvas
+  // --- UPGRADED: DIGITAL ZOOM "PORTRAIT" EFFECT ---
+  useEffect(() => {
+    if (quickEnrollData && zoomCanvasRef.current) {
+      const img = new Image();
+      img.onload = () => {
+        const ctx = zoomCanvasRef.current.getContext('2d');
+        const[x, y, w, h] = quickEnrollData.box;
+        
+        // 🚀 FIX: Instead of a tight face crop, we take a wider "Head & Shoulders" portrait.
+        // This prevents the image from over-stretching and looking heavily pixelated!
+        const padX = w * 0.6; // Take 60% more space on the sides
+        const padY = h * 0.4; // Take 40% more space on top/bottom
+        
+        const sx = Math.max(0, x - padX);
+        const sy = Math.max(0, y - padY);
+        const sw = Math.min(img.width - sx, w + (padX * 2));
+        const sh = Math.min(img.height - sy, h + (padY * 2)); // Crop down to mid-chest
 
-      const response = await fetch(`${API_BASE}/assign-face`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          student_id: String(studentId),
-          student_name: studentName,
-          image: liveFrame,
-          box: expandedBox
-        })
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail);
-      alert(`✅ Successfully Enrolled ${studentName}!`);
-      setLiveZoom(null); // zoom back out
-      // force a refresh of the face database on backend (already done)
-    } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
-  };
+        // 🚀 FIX: Turn on Canvas High-Quality Anti-Aliasing (Smoothing)
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
 
-  // ---------- QUICK ENROLL (old popup method) – kept for compatibility ----------
-  const captureQuickEnroll = (image, box) => {
-    setQuickEnrollData({ image, box });
-    stopSurveillance(); // pause live feed while teacher picks name
-  };
+        // Draw it into the 400x400 circular canvas
+        ctx.clearRect(0, 0, 400, 400);
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 400, 400);
+      };
+      img.src = quickEnrollData.image;
+    }
+  },[quickEnrollData]);
 
   const assignQuickEnroll = async (studentId, studentName) => {
     try {
       const response = await fetch(`${API_BASE}/assign-face`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          student_id: String(studentId),
-          student_name: studentName,
-          image: quickEnrollData.image,
-          box: quickEnrollData.box
-        })
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            student_id: String(studentId),
+            student_name: studentName,
+            image: quickEnrollData.image,
+            box: quickEnrollData.box 
+          })
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
+      
       alert(`✅ Successfully Enrolled!`);
-      setQuickEnrollData(null);
-      toggleSurveillance(); // restart live feed
+      setQuickEnrollData(null); 
+      toggleSurveillance(); // 🚀 Restart the live feed instantly after saving!
+      
     } catch (error) { alert(`❌ Quick Enroll Error: ${error.message}`); }
   };
 
   const closeModal = () => setIsModalOpen(false);
 
-  // ---------- RENDER ----------
   return (
     <div>
       <div className="top-bar">
@@ -405,11 +375,15 @@ function App() {
             <div style={{overflowX: 'auto'}}>
               <table>
                 <thead>
-                  <tr><th>Class Nbr</th><th>Semester</th><th>Course Code</th><th>Course Name</th><th>Start Time</th><th>Room ID</th><th style={{textAlign: 'center', minWidth: '250px'}}>Actions</th></tr>
+                  <tr>
+                    <th>Class Nbr</th><th>Semester</th><th>Course Code</th>
+                    <th>Course Name</th><th>Start Time</th><th>Room ID</th>
+                    <th style={{textAlign: 'center', minWidth: '250px'}}>Actions</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {classes.map((cls, idx) => (
-                    <tr key={idx}>
+                    <tr key={idx} style={{ cursor: 'default' }}>
                       <td>{cls['Class Nbr']}</td><td>{cls['Semester']}</td><td>{cls['Course Code']}</td>
                       <td>{cls['Course Name']}</td><td>{cls['Start Time']}</td><td>{cls['Room ID']}</td>
                       <td style={{textAlign: 'center', display: 'flex', gap: '10px', justifyContent: 'center'}}>
@@ -429,18 +403,39 @@ function App() {
         <div className="app-container">
           <div className="content-box">
             <button className="back-btn" onClick={() => setView('classes')}>← Back to Classes</button>
+            
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
               <h2 className="section-title" style={{ display: 'inline-block', margin: 0 }}>Class Roster: {selectedClass}</h2>
-              <button style={{ background: '#28a745', color: 'white', padding: '10px 20px', borderRadius: '5px', border: 'none', cursor: 'pointer', fontWeight: 'bold' }} onClick={downloadAttendanceReport}>📥 Download Excel Report</button>
+              <button 
+                style={{ background: '#28a745', color: 'white', padding: '10px 20px', borderRadius: '5px', border: 'none', cursor: 'pointer', fontWeight: 'bold' }}
+                onClick={downloadAttendanceReport}
+              >
+                📥 Download Excel Report
+              </button>
             </div>
+            
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
-              <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>Launch the Full-Screen AI Tracker to automatically mark student attendance.</p>
-              <button style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} onClick={toggleSurveillance}>▶ Launch Full-Screen Tracker</button>
+              <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>
+                Launch the Full-Screen AI Tracker to automatically mark student attendance.
+              </p>
+              <button 
+                style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} 
+                onClick={toggleSurveillance}
+              >
+                ▶ Launch Full-Screen Tracker
+              </button>
             </div>
+
             <div style={{maxWidth: '800px', margin: '0 auto'}}>
               <table>
-                <thead><tr><th>Student ID</th><th>Student Name</th><th style={{textAlign: 'center'}}>Attendance Status</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Student ID</th>
+                    <th>Student Name</th>
+                    <th style={{textAlign: 'center'}}>Attendance Status</th>
+                  </tr>
+                </thead>
                 <tbody>
                   {students.map((student, idx) => {
                     const status = attendanceRecords[student['Student ID']];
@@ -450,9 +445,16 @@ function App() {
                         <td>{student['Student Name']}</td>
                         <td style={{textAlign: 'center'}}>
                           {status === 'present' ? (
-                            <span style={{ color: 'white', background: '#28a745', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>✅ Present</span>
+                            <span style={{ color: 'white', background: '#28a745', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>
+                              ✅ Present
+                            </span>
                           ) : (
-                            <button style={{ padding: '6px 12px', backgroundColor: status === 'failed' ? '#dc3545' : '#e9ecef', color: status === 'failed' ? 'white' : '#333', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', width: '150px' }} onClick={() => { setVerifyingStudent(student); setVerifyResult(''); setIsVerifyModalOpen(true); }}>{status === 'failed' ? '❌ Retry Scan' : 'Verify Attendance'}</button>
+                            <button 
+                              style={{ padding: '6px 12px', backgroundColor: status === 'failed' ? '#dc3545' : '#e9ecef', color: status === 'failed' ? 'white' : '#333', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', width: '150px' }}
+                              onClick={() => { setVerifyingStudent(student); setVerifyResult(''); setIsVerifyModalOpen(true); }}
+                            >
+                              {status === 'failed' ? '❌ Retry Scan' : 'Verify Attendance'}
+                            </button>
                           )}
                         </td>
                       </tr>
@@ -465,89 +467,83 @@ function App() {
         </div>
       )}
 
-      {/* FULL-SCREEN SURVEILLANCE OVERLAY (with CSS zoom & PiP) */}
+      {/* ---------------- FULL-SCREEN SURVEILLANCE OVERLAY ---------------- */}
       {isSurveillanceActive && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column' }}>
+          
+          <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2 style={{ margin: 0, color: 'var(--accent-gold)' }}>🔴 Live Classroom Tracking</h2>
-            <button onClick={stopSurveillance} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>Close Tracker</button>
+            <button 
+              onClick={stopSurveillance} 
+              style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
+              Close Tracker
+            </button>
           </div>
-          <div style={{ flex: 1, position: 'relative', background: '#000', overflow: 'hidden' }}>
-            {/* Zoom wrapper */}
-            <div style={{
-              position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
-              transform: liveZoom ? `scale(3.5)` : 'scale(1)',
-              transformOrigin: liveZoom ? liveZoom.cssOrigin : 'center center',
-              transition: 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)'
-            }}>
-              <Webcam
-                ref={surveillanceWebcamRef}
-                audio={false}
-                mirrored={false}
-                screenshotFormat="image/jpeg"
-                videoConstraints={VIDEO_CONSTRAINTS}
+
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
+            <div style={{ position: 'relative', aspectRatio: '16/9', maxHeight: '100%', maxWidth: '100%' }}>
+              <Webcam 
+                ref={surveillanceWebcamRef} 
+                audio={false} 
+                mirrored={false} 
+                screenshotFormat="image/jpeg" 
+                videoConstraints={VIDEO_CONSTRAINTS} 
                 style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
               />
-              <canvas
-                ref={canvasRef}
-                onClick={handleCanvasClick}
-                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: liveZoom ? 'default' : 'crosshair' }}
+              <canvas 
+                ref={canvasRef} 
+                onClick={handleCanvasClick} 
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: 'crosshair' }} 
               />
             </div>
-            {/* PiP and side panel when zoomed */}
-            {liveZoom && (
-              <>
-                <div onClick={() => setLiveZoom(null)} style={{ position: 'absolute', top: '20px', left: '20px', width: '320px', height: '180px', border: '3px solid white', borderRadius: '8px', overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.8)', cursor: 'pointer', zIndex: 4000, background: '#000' }}>
-                  <canvas ref={pipCanvasRef} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                  <div style={{ position: 'absolute', bottom: '5px', left: 0, width: '100%', textAlign: 'center', color: 'white', background: 'rgba(0,0,0,0.6)', padding: '4px 0', fontSize: '13px', fontWeight: 'bold' }}>Click here to Zoom Out</div>
-                </div>
-                <div style={{ position: 'absolute', right: 0, top: 0, width: '400px', height: '100%', background: 'rgba(20,20,30,0.95)', zIndex: 4000, padding: '20px', borderLeft: '4px solid var(--accent-gold)', overflowY: 'auto', boxShadow: '-10px 0 30px rgba(0,0,0,0.8)', display: 'flex', flexDirection: 'column' }}>
-                  <h2 style={{ color: 'white', marginTop: 0 }}>⚡ Live Enroll</h2>
-                  <p style={{ color: '#aaa', fontSize: '14px', marginBottom: '20px' }}>The camera is still live. Wait until the student looks directly forward, then click their name below to register their DNA!</p>
-                  <div className="student-select-list" style={{ flex: 1, border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c', overflowY: 'auto', padding: '10px' }}>
-                    {students.map((student, idx) => (
-                      <div key={idx} className="student-select-item" style={{ borderBottomColor: '#444', color: 'white' }} onClick={() => assignLiveEnroll(student['Student ID'], student['Student Name'])}>
-                        <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
-                        <span style={{ color: 'var(--accent-gold)' }}>Assign ➔</span>
-                      </div>
-                    ))}
-                  </div>
-                  <button className="btn-cancel" style={{ width: '100%', marginTop: '20px', padding: '15px' }} onClick={() => setLiveZoom(null)}>Cancel & Zoom Out</button>
-                </div>
-              </>
-            )}
           </div>
         </div>
       )}
 
-      {/* QUICK ENROLL POPUP (old style) */}
+      {/* ---------------- NEW: TARGET LOCKED INVESTIGATION ZOOM UI ---------------- */}
       {quickEnrollData && (
-        <div className="modal-overlay" style={{ zIndex: 5000, backdropFilter: 'blur(10px)' }}>
-          <div className="modal-content" style={{ maxWidth: '850px', display: 'flex', gap: '30px', alignItems: 'flex-start', background: '#1e1e2d', color: 'white', border: '2px solid #3e426b' }}>
-            <div style={{ flex: 1, textAlign: 'center' }}>
-              <h3 style={{ color: 'var(--accent-gold)', marginTop: 0 }}>🎯 Target Locked</h3>
-              <canvas ref={zoomCanvasRef} width="400" height="400" style={{ borderRadius: '12px', border: '4px solid var(--accent-gold)', objectFit: 'cover', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', width: '100%' }} />
-              <p style={{ color: '#aaa', fontSize: '14px', marginTop: '15px' }}>Clicking assign will extract biometric DNA from this specific crop.</p>
+        <div className="modal-overlay" style={{zIndex: 5000, backdropFilter: 'blur(10px)'}}>
+          <div className="modal-content" style={{maxWidth: '850px', display: 'flex', gap: '30px', alignItems: 'flex-start', background: '#1e1e2d', color: 'white', border: '2px solid #3e426b'}}>
+            
+            {/* LEFT: The High-Res Zoomed In View */}
+            <div style={{flex: 1, textAlign: 'center'}}>
+              <h3 style={{color: 'var(--accent-gold)', marginTop: 0}}>🎯 Target Locked</h3>
+              <canvas 
+                ref={zoomCanvasRef} 
+                width="400" height="400" 
+                style={{borderRadius: '12px', border: '4px solid var(--accent-gold)', objectFit: 'cover', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', width: '100%'}} 
+              />
+              <p style={{color: '#aaa', fontSize: '14px', marginTop: '15px'}}>Clicking assign will extract biometric DNA from this specific crop.</p>
             </div>
-            <div style={{ flex: 1, textAlign: 'left' }}>
-              <h2 className="modal-header" style={{ marginTop: 0, borderBottomColor: '#444' }}>⚡ Quick Enroll</h2>
-              <p style={{ color: '#ccc' }}>Who is this student?</p>
-              <div className="student-select-list" style={{ maxHeight: '350px', border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c' }}>
+
+            {/* RIGHT: Name Selection Panel */}
+            <div style={{flex: 1, textAlign: 'left'}}>
+              <h2 className="modal-header" style={{marginTop: 0, borderBottomColor: '#444'}}>⚡ Quick Enroll</h2>
+              <p style={{color: '#ccc'}}>Who is this student?</p>
+              
+              <div className="student-select-list" style={{maxHeight: '350px', border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c'}}>
                 {students.map((student, idx) => (
-                  <div key={idx} className="student-select-item" style={{ borderBottomColor: '#444', color: 'white' }} onClick={() => assignQuickEnroll(student['Student ID'], student['Student Name'])}>
+                  <div key={idx} className="student-select-item" style={{borderBottomColor: '#444', color: 'white'}} onClick={() => assignQuickEnroll(student['Student ID'], student['Student Name'])}>
                     <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
-                    <span style={{ color: 'var(--accent-gold)' }}>Assign ➔</span>
+                    <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
                   </div>
                 ))}
               </div>
-              <br />
-              <button className="btn-cancel" style={{ width: '100%' }} onClick={() => { setQuickEnrollData(null); toggleSurveillance(); }}>Cancel & Resume Tracking</button>
+              
+              <br/>
+              <button className="btn-cancel" style={{width: '100%'}} onClick={() => {
+                setQuickEnrollData(null);
+                toggleSurveillance(); // 🚀 Resumes the live feed if they cancel!
+              }}>
+                Cancel & Resume Tracking
+              </button>
             </div>
+
           </div>
         </div>
       )}
 
-      {/* ENROLLMENT MODAL (9-image burst) */}
+      {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
       {isModalOpen && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -564,7 +560,9 @@ function App() {
                     {enrollStep === 'right' && "➡️ Turn head slightly to the RIGHT"}
                   </div>
                 </div>
-                <button className="btn-capture" onClick={captureBurst} disabled={isCapturing} style={{ opacity: isCapturing ? 0.7 : 1 }}>{isCapturing ? "📸 Capturing Burst..." : "📸 Capture Image"}</button>
+                <button className="btn-capture" onClick={captureBurst} disabled={isCapturing} style={{ opacity: isCapturing ? 0.7 : 1 }}>
+                  {isCapturing ? "📸 Capturing Burst..." : "📸 Capture Image"}
+                </button>
                 <button className="btn-cancel" onClick={closeModal}>Cancel</button>
               </>
             )}
@@ -576,7 +574,7 @@ function App() {
                   {students.map((student, idx) => (
                     <div key={idx} className="student-select-item" onClick={() => assignFaceToStudent(student['Student ID'], student['Student Name'])}>
                       <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
-                      <span style={{ color: 'var(--accent-gold)' }}>Assign ➔</span>
+                      <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
                     </div>
                   ))}
                 </div>
@@ -584,28 +582,29 @@ function App() {
               </>
             )}
             {enrollStep === 'saving' && (
-              <div style={{ padding: '50px' }}><h3>⏳ Extracting Face DNA...</h3><p>AI is processing 9 captured frames...</p></div>
+              <div style={{padding: '50px'}}><h3>⏳ Extracting Face DNA...</h3><p>AI is processing 9 captured frames...</p></div>
             )}
           </div>
         </div>
       )}
 
-      {/* 1-ON-1 VERIFICATION MODAL */}
+      {/* ---------------- 1-ON-1 VERIFICATION MODAL ---------------- */}
       {isVerifyModalOpen && verifyingStudent && (
-        <div className="modal-overlay" style={{ zIndex: 4000 }}>
+        <div className="modal-overlay" style={{zIndex: 4000}}>
           <div className="modal-content">
             <h2 className="modal-header">Verify Identity</h2>
-            <h3 style={{ marginTop: 0, color: '#555' }}>Target Student: {verifyingStudent['Student Name']}</h3>
-            <div className="webcam-container" style={{ minHeight: '250px' }}>
+            <h3 style={{marginTop: 0, color: '#555'}}>Target Student: {verifyingStudent['Student Name']}</h3>
+            <div className="webcam-container" style={{minHeight: '250px'}}>
               <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={VIDEO_CONSTRAINTS} />
-              <div className="webcam-mask" style={{ width: '180px', height: '240px' }}></div>
+              <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
             </div>
-            <div style={{ margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745' }}>{verifyResult}</div>
+            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
             <button className="btn-capture" onClick={runVerificationScan}>🔍 Scan Face</button>
             <button className="btn-cancel" onClick={() => setIsVerifyModalOpen(false)}>Close</button>
           </div>
         </div>
       )}
+
     </div>
   );
 }
