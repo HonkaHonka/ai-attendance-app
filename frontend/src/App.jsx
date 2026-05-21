@@ -258,7 +258,7 @@ function App() {
   },[detectedFaces]);
 
   // 🔍 INSPECT CANVAS RENDERER (right-click zoom) - NO CSS TRANSFORM
-  useEffect(() => {
+    useEffect(() => {
     let animId;
     
     const drawInspect = () => {
@@ -271,23 +271,34 @@ function App() {
       const canvas = inspectCanvasRef.current;
       const ctx = canvas.getContext('2d');
       
-      const { box, faceBox, scale } = inspectMode;
+      const { box, faceBox, scale, videoW, videoH } = inspectMode;
       
       const outputW = 640;
       const outputH = 480;
-      const srcW = outputW / scale;
-      const srcH = outputH / scale;
       
-      const centerX = faceBox ? (faceBox[0] + faceBox[2] / 2) : (box[0] + box[2] / 2);
-      const centerY = faceBox ? (faceBox[1] + box[3] / 2) : (box[1] + box[3] / 2);
+      // 🎯 Source crop size in VIDEO coordinates
+      const srcW = (outputW / scale) * (videoW / AI_W);
+      const srcH = (outputH / scale) * (videoH / AI_H);
       
-      const srcX = Math.max(0, Math.min(video.videoWidth - srcW, centerX - srcW / 2));
-      const srcY = Math.max(0, Math.min(video.videoHeight - srcH, centerY - srcH / 2));
+      // 🎯 Center point in VIDEO coordinates
+      let centerX, centerY;
+      if (faceBox) {
+        centerX = faceBox[0] + faceBox[2] / 2;
+        centerY = faceBox[1] + faceBox[3] / 2;
+      } else {
+        // Fallback: convert body box center from AI to video
+        centerX = (box[0] + box[2] / 2) * (videoW / AI_W);
+        centerY = (box[1] + box[3] / 2) * (videoH / AI_H);
+      }
+      
+      const srcX = Math.max(0, Math.min(videoW - srcW, centerX - srcW / 2));
+      const srcY = Math.max(0, Math.min(videoH - srcH, centerY - srcH / 2));
       
       canvas.width = outputW;
       canvas.height = outputH;
       ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outputW, outputH);
       
+      // 🎯 Draw face outline in inspect canvas coordinates
       if (faceBox) {
         const [fx, fy, fw, fh] = faceBox;
         const sx = (fx - srcX) * (outputW / srcW);
@@ -343,23 +354,22 @@ function App() {
     });
   };
 
-  const handleCanvasRightClick = (e) => {
+    const handleCanvasRightClick = (e) => {
     e.preventDefault();
 
     const canvas = canvasRef.current;
     if (!canvas) return;
     
     const rect = canvas.getBoundingClientRect();
-    const scaleX = AI_W / rect.width;
-    const scaleY = AI_H / rect.height;
-    
-    const clickX = (e.clientX - rect.left) * scaleX;
-    const clickY = (e.clientY - rect.top) * scaleY;
+    // 🎯 Map click to AI canvas coordinates (1280x720)
+    const clickX_AI = (e.clientX - rect.left) * (AI_W / rect.width);
+    const clickY_AI = (e.clientY - rect.top) * (AI_H / rect.height);
 
     detectedFaces.forEach(face => {
       const [x, y, w, h] = face.box;
       
-      if (clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
+      // Hit test in AI coordinates
+      if (clickX_AI >= x && clickX_AI <= x + w && clickY_AI >= y && clickY_AI <= y + h) {
         const boxArea = w * h;
         const canvasArea = AI_W * AI_H;
         const ratio = boxArea / canvasArea;
@@ -369,10 +379,30 @@ function App() {
         else if (ratio < 0.04) zoomScale = 2.0;
         else zoomScale = 1.3;
         
+        // 🎯 Convert face_box from AI coords to VIDEO coords for accurate crop
+        const video = surveillanceWebcamRef.current?.video;
+        const vidW = video?.videoWidth || AI_W;
+        const vidH = video?.videoHeight || AI_H;
+        
+        const scaleToVideo = vidW / AI_W;
+        
+        let videoFaceBox = null;
+        if (face.face_box) {
+          const [fx, fy, fw, fh] = face.face_box;
+          videoFaceBox = [
+            fx * scaleToVideo,
+            fy * scaleToVideo,
+            fw * scaleToVideo,
+            fh * scaleToVideo
+          ];
+        }
+        
         setInspectMode({
-          box: face.box,
-          faceBox: face.face_box || null,
-          scale: zoomScale
+          box: face.box,           // AI coords (for reference)
+          faceBox: videoFaceBox,   // VIDEO coords (for accurate crop)
+          scale: zoomScale,
+          videoW: vidW,
+          videoH: vidH
         });
       }
     });
@@ -388,17 +418,28 @@ function App() {
     }));
   };
 
-  const assignFromInspect = () => {
+    const assignFromInspect = () => {
     if (!inspectMode) return;
     
     const canvas = inspectCanvasRef.current;
     if (!canvas) return;
     
+    // 🎯 Use the displayed crop as the assignment image
+    // The box sent to backend should be the FACE box if available, else body box
+    const assignBox = inspectMode.faceBox 
+      ? [
+          Math.round(inspectMode.faceBox[0] * (AI_W / inspectMode.videoW)),
+          Math.round(inspectMode.faceBox[1] * (AI_H / inspectMode.videoH)),
+          Math.round(inspectMode.faceBox[2] * (AI_W / inspectMode.videoW)),
+          Math.round(inspectMode.faceBox[3] * (AI_H / inspectMode.videoH))
+        ]
+      : inspectMode.box;
+    
     setQuickEnrollData({ 
       image: canvas.toDataURL('image/jpeg', 0.8),
-      box: inspectMode.box 
+      box: assignBox 
     });
-    setLiveZoom({ origBox: inspectMode.box });
+    setLiveZoom({ origBox: assignBox });
     setInspectMode(null);
   };
 
