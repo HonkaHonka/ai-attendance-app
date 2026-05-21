@@ -15,7 +15,8 @@ import asyncio
 from ultralytics import YOLO
 from facenet_pytorch import MTCNN, InceptionResnetV1
 from typing import Dict
-
+import time
+import shutil
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -43,7 +44,11 @@ def load_face_db():
     with open(MEMORY_FILE, "rb") as f: return pickle.load(f)
 
 def save_face_db(db):
-    with open(MEMORY_FILE, "wb") as f: pickle.dump(db, f)
+    if os.path.exists(MEMORY_FILE):
+        shutil.copy2(MEMORY_FILE, MEMORY_FILE + ".backup")
+    with open(MEMORY_FILE, "wb") as f:
+        pickle.dump(db, f)
+    print(f"💾 DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
 
 global_face_db = load_face_db()
 
@@ -76,6 +81,78 @@ def students(email: str, class_nbr: int):
     class_df = df[(df["Faculty Email"].str.lower() == email.lower()) & (df["Class Nbr"] == class_nbr)]
     return class_df[["Student ID", "Student Name"]].to_dict("records")
 
+@app.get("/api/db-health")
+def db_health():
+    """Instant snapshot of database quality. Works with 1 student or 100."""
+    report = []
+    for sid, data in global_face_db.items():
+        embs = data["embeddings"]
+        
+        if len(embs) > 1:
+            sims = []
+            for i in range(len(embs)):
+                for j in range(i+1, len(embs)):
+                    sims.append(cosine_similarity(embs[i], embs[j]))
+            avg_sim = float(np.mean(sims))
+            min_sim = float(np.min(sims))
+        else:
+            avg_sim, min_sim = 1.0, 1.0
+        
+        flag = "OK"
+        if len(embs) > 20:
+            flag = "TOO_MANY_EMBS"
+        elif len(embs) == 0:
+            flag = "EMPTY"
+        elif min_sim < 0.75:
+            flag = "HIGH_VARIANCE"
+        
+        report.append({
+            "student_id": sid,
+            "name": data["name"],
+            "embedding_count": len(embs),
+            "avg_self_similarity": round(avg_sim, 3),
+            "min_self_similarity": round(min_sim, 3),
+            "flag": flag
+        })
+    
+    suspicious = [r for r in report if r["flag"] != "OK"]
+    return {
+        "total_students": len(global_face_db),
+        "suspicious_count": len(suspicious),
+        "suspicious": suspicious,
+        "students": report
+    }
+
+
+@app.get("/api/session-report")
+def session_report():
+    """Report on what happened during the CURRENT 5-minute class."""
+    if not session_stats["start_time"]:
+        return {"message": "No session started yet."}
+    
+    duration = time.time() - session_stats["start_time"]
+    avg_sym = float(np.mean(session_stats["avg_symmetry"])) if session_stats["avg_symmetry"] else 0.0
+    
+    return {
+        "session_duration_sec": round(duration, 1),
+        "embeddings_added_per_student": session_stats["embeddings_added"],
+        "total_embeddings_added": sum(session_stats["embeddings_added"].values()),
+        "rejected_by_symmetry_gate": session_stats["rejected_by_symmetry"],
+        "rejected_by_score_gate": session_stats["rejected_by_score"],
+        "avg_symmetry_of_accepted": round(avg_sym, 3),
+        "poisoning_risk": "LOW" if avg_sym > 0.90 else "MEDIUM" if avg_sym > 0.85 else "HIGH"
+    }
+@app.post("/api/reset-session")
+def reset_session():
+    global session_stats
+    session_stats = {
+        "start_time": None,
+        "embeddings_added": {},
+        "rejected_by_symmetry": 0,
+        "rejected_by_score": 0,
+        "avg_symmetry": [],
+    }
+    return {"status": "Session counters reset"}
 # =========================================================
 # ENROLLMENT & VERIFICATION (RESTORED)
 # =========================================================
@@ -143,86 +220,238 @@ def verify_face(payload: VerifyPayload):
 # LIVE SURVEILLANCE CORE
 # =========================================================
 live_tracker_memory = {} 
+session_stats = {
+    "start_time": None,
+    "embeddings_added": {},      # sid -> count
+    "rejected_by_symmetry": 0,   # how many bad angles were blocked
+    "rejected_by_score": 0,      # how many bad matches were blocked
+    "avg_symmetry": [],          # list of symmetry scores that PASSED
+}
 next_track_id = 1
 RECOGNITION_THRESHOLD = 0.65
 
-def process_frame(image_b64):
-    global live_tracker_memory, next_track_id
-    if "," in image_b64: image_b64 = image_b64.split(",")[1]
 
-    img = Image.open(io.BytesIO(base64.b64decode(image_b64))).convert("RGB")
-    frame_bgr = np.array(img)[:, :, ::-1]
 
-    results = yolo_person.track(frame_bgr, conf=0.45, iou=0.40, classes=[0], tracker="botsort.yaml", persist=True, verbose=False)
+
+
+def recognize_face(emb):
+    best_score = -1.0
+    best_id, best_name = None, "Unknown"
     
-    faces_out =[]
+    for sid, data in global_face_db.items():
+        for saved in data["embeddings"]:
+            sim = cosine_similarity(emb, saved)
+            if sim > best_score:
+                best_score, best_id, best_name = sim, sid, data["name"]
+    
+    MATCH_THRESHOLD = 0.65
+    if best_score >= MATCH_THRESHOLD:
+        return best_id, best_name, best_score
+    return None, "Unknown", best_score
+
+
+def process_frame(image_b64):
+    global live_tracker_memory
+    
+    if not image_b64:
+        return []
+    if "," in image_b64:
+        image_b64 = image_b64.split(",")[1]
+    if not image_b64:
+        return []
+
+    try:
+        img_bytes = base64.b64decode(image_b64)
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception:
+        return []
+
+    frame_bgr = np.array(img)[:, :, ::-1]
+    
+    results = yolo_person.track(
+        frame_bgr,
+        conf=0.45,
+        iou=0.40,
+        classes=[0],
+        tracker="botsort.yaml",
+        persist=True,
+        verbose=False
+    )
+    
+    faces_out = []
     current_frame_tracks = {}
     save_required = False
+    current_time = time.time()
 
     if results and results[0].boxes is not None and results[0].boxes.id is not None:
         boxes = results[0].boxes.xyxy.cpu().numpy()
         track_ids = results[0].boxes.id.cpu().numpy()
 
         for box, track_id in zip(boxes, track_ids):
-            if np.isnan(box).any(): continue
+            if np.isnan(box).any():
+                continue
+                
             x1, y1, x2, y2 = map(int, box)
             track_id = int(track_id)
-            if (x2 - x1) < 40 or (y2 - y1) < 40: continue
+            
+            if (x2 - x1) < 40 or (y2 - y1) < 40:
+                continue
 
-            # Get previous memory of this track ID
             person = live_tracker_memory.get(track_id, {
-                "student_id": None, "name": "Scanning...", "status": "scanning", "frames_no_face": 0
+                "student_id": None,
+                "name": "Scanning...",
+                "status": "scanning",
+                "frames_no_face": 0,
+                "last_seen": current_time
             })
+            person["last_seen"] = current_time
 
-            # 🚀 FIX: Increased Head ROI to 50% so it doesn't fail when you sit close!
             head_h = int((y2 - y1) * 0.50)
-            hx1, hy1 = max(0, x1 - 20), max(0, y1 - 20)
-            hx2, hy2 = min(img.width, x2 + 20), min(img.height, y1 + head_h + 20)
+            hx1 = max(0, x1 - 20)
+            hy1 = max(0, y1 - 20)
+            hx2 = min(img.width, x2 + 20)
+            hy2 = min(img.height, y1 + head_h + 20)
             
-            # THE QUALITY GATE
-            face_tensor = mtcnn(img.crop((hx1, hy1, hx2, hy2)))
-            
-            if face_tensor is not None:
-                person["frames_no_face"] = 0 # Reset miss counter
-                with torch.no_grad():
-                    emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+            if hx2 <= hx1 or hy2 <= hy1:
+                continue
                 
-                best_score = -1
-                best_id, best_name = None, "Unknown"
-                for sid, data in global_face_db.items():
-                    for saved in data["embeddings"]:
-                        sim = cosine_similarity(emb, saved)
-                        if sim > best_score:
-                            best_score, best_id, best_name = sim, sid, data["name"]
+            head_crop = img.crop((hx1, hy1, hx2, hy2))
 
-                if best_score >= RECOGNITION_THRESHOLD:
-                    person["student_id"], person["name"], person["status"] = best_id, best_name, "known"
-                    # Active Learning
-                    if 0.80 < best_score < 0.96 and len(global_face_db[best_id]["embeddings"]) < 15:
-                        global_face_db[best_id]["embeddings"].append(emb.tolist())
-                        save_required = True
-                else:
-                    person["student_id"], person["name"], person["status"] = None, "Unknown", "unknown"
-            else:
-                # No face found! (Back of head, reflection, or chair)
+            # --- MTCNN detect + landmarks ---
+            f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
+            
+            face_found = False
+
+            if f_boxes is not None and len(f_boxes) > 0 and f_boxes[0] is not None:
+                boxes_raw   = f_boxes[0]
+                probs_raw   = f_probs[0]
+                landmarks_raw = f_landmarks[0]
+                
+                # Robust shape normalization
+                boxes_arr = np.array(boxes_raw)
+                if boxes_arr.ndim == 1:
+                    boxes_arr = boxes_arr.reshape(1, 4)
+                
+                probs_arr = np.array(probs_raw)
+                if probs_arr.ndim == 0:
+                    probs_arr = probs_arr.reshape(1)
+                
+                landmarks_arr = np.array(landmarks_raw)
+                if landmarks_arr.ndim == 2:
+                    landmarks_arr = landmarks_arr.reshape(1, 5, 2)
+                
+                if len(boxes_arr) > 0:
+                    best_idx = int(np.argmax(probs_arr))
+                    
+                    if probs_arr[best_idx] > 0.90:
+                        face_found = True
+                        person["frames_no_face"] = 0
+
+                        best_box = boxes_arr[best_idx:best_idx+1]
+                        
+                        extracted = mtcnn.extract(head_crop, best_box, save_path=None)
+                        
+                        # 🛡️ FIX: Handle Tensor/list/None return from extract()
+                        if extracted is None:
+                            face_tensors = []
+                        elif isinstance(extracted, torch.Tensor):
+                            face_tensors = [extracted]
+                        else:
+                            face_tensors = extracted
+                        
+                        if len(face_tensors) > 0:
+                            face_tensor = face_tensors[0]
+                            
+                            with torch.no_grad():
+                                emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+                            
+                            sid, name, score = recognize_face(emb)
+
+                            if sid:
+                                person["student_id"] = sid
+                                person["name"] = name
+                                person["status"] = "known"
+
+                                existing = global_face_db[sid]["embeddings"]
+                                
+                                # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new
+                                if (0.72 < score < 0.94 and 
+                                    probs_arr[best_idx] > 0.99 and 
+                                    len(existing) < 8):
+                                    
+                                    # Check if this angle/view is already represented
+                                    if len(existing) > 0:
+                                        sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing]
+                                        if max(sims_to_existing) > 0.88:
+                                            # Already have this angle, skip to prevent bloat
+                                            pass
+                                        else:
+                                            # New angle detected, check symmetry
+                                            lm = landmarks_arr[best_idx]
+                                            left_eye, right_eye, nose = lm[0], lm[1], lm[2]
+                                            dist_left = np.linalg.norm(nose - left_eye)
+                                            dist_right = np.linalg.norm(nose - right_eye)
+                                            symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
+                                            
+                                            if symmetry > 0.60:  # 🎯 Accept side profiles for classroom reality
+                                                existing.append(emb.tolist())
+                                                save_required = True
+                                                
+                                                session_stats["embeddings_added"][sid] = session_stats["embeddings_added"].get(sid, 0) + 1
+                                                session_stats["avg_symmetry"].append(symmetry)
+                                                if session_stats["start_time"] is None:
+                                                    session_stats["start_time"] = time.time()
+                                                
+                                                print(f"🧠 ACTIVE LEARN: New angle for {name} (sym: {symmetry:.2f}, count: {len(existing)})")
+                                            else:
+                                                session_stats["rejected_by_symmetry"] += 1
+                                    else:
+                                        # Should not happen (student has at least enrollment embedding), but safety
+                                        pass
+                                else:
+                                    if not (0.72 < score < 0.94) and len(existing) < 8:
+                                        session_stats["rejected_by_score"] += 1
+                            else:
+                                person["student_id"] = None
+                                person["name"] = "Unknown"
+                                person["status"] = "unknown"
+
+            if not face_found:
                 person["frames_no_face"] += 1
                 if person["frames_no_face"] > 3:
-                    # Drop the box if no face is seen for a few frames
-                    person["student_id"], person["name"], person["status"] = None, "No Face", "no_face"
+                    person["student_id"] = None
+                    person["name"] = "No Face"
+                    person["status"] = "no_face"
 
             current_frame_tracks[track_id] = person
 
-            # Send to React if it's a valid face/body
             if person["status"] != "no_face":
                 faces_out.append({
-                    "box":[x1, y1, x2 - x1, y2 - y1],
+                    "box": [x1, y1, x2 - x1, y2 - y1],
                     "student_id": person["student_id"],
                     "name": person["name"],
                     "status": person["status"]
                 })
 
-    live_tracker_memory = current_frame_tracks
-    if save_required: save_face_db(global_face_db)
+    # --- TTL Tracker Memory ---
+    for tid, tdata in current_frame_tracks.items():
+        live_tracker_memory[tid] = tdata
+    
+    live_tracker_memory = {
+        tid: tdata for tid, tdata in live_tracker_memory.items()
+        if (current_time - tdata.get("last_seen", 0)) < 10.0
+    }
+
+    if save_required:
+        save_face_db(global_face_db)
+
+        # --- MEMORY LEAK MONITOR ---
+    if not hasattr(process_frame, "_last_mem_report"):
+        process_frame._last_mem_report = 0
+    if current_time - process_frame._last_mem_report > 10:
+        print(f"🧠 MEM-TRACK: {len(live_tracker_memory)} active tracks | DB: {len(global_face_db)} students")
+        process_frame._last_mem_report = current_time
+
     return faces_out
 
 @app.websocket("/ws/surveillance")
@@ -250,27 +479,111 @@ class AssignPayload(BaseModel):
 @app.post("/api/assign-face")
 def assign_face(p: AssignPayload):
     if "," in p.image: p.image = p.image.split(",")[1]
-    img = Image.open(io.BytesIO(base64.b64decode(p.image))).convert("RGB")
+    
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(p.image))).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image data.")
+    
     x, y, w, h = map(int, p.box)
     
+    # Head ROI (same logic as surveillance)
     head_h = int(h * 0.50)
-    hx1, hy1 = max(0, x - 20), max(0, y - 20)
-    hx2, hy2 = min(img.width, x + w + 20), min(img.height, y + head_h + 20)
+    hx1 = max(0, x - 20)
+    hy1 = max(0, y - 20)
+    hx2 = min(img.width, x + w + 20)
+    hy2 = min(img.height, y + head_h + 20)
     
-    face_tensor = mtcnn(img.crop((hx1, hy1, hx2, hy2)))
-    if face_tensor is None:
-        raise HTTPException(status_code=400, detail="No face detected. Ensure student is looking at camera.")
-
+    if hx2 <= hx1 or hy2 <= hy1:
+        raise HTTPException(status_code=400, detail="Invalid face region.")
+    
+    head_crop = img.crop((hx1, hy1, hx2, hy2))
+    
+    # Robust detect + landmarks
+    f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
+    
+    if f_boxes is None or len(f_boxes) == 0 or f_boxes[0] is None:
+        raise HTTPException(status_code=400, detail="No face detected. Ask student to look at camera.")
+    
+    boxes_raw = f_boxes[0]
+    probs_raw = f_probs[0]
+    landmarks_raw = f_landmarks[0]
+    
+    boxes_arr = np.array(boxes_raw)
+    if boxes_arr.ndim == 1: boxes_arr = boxes_arr.reshape(1, 4)
+    probs_arr = np.array(probs_raw)
+    if probs_arr.ndim == 0: probs_arr = probs_arr.reshape(1)
+    landmarks_arr = np.array(landmarks_raw)
+    if landmarks_arr.ndim == 2: landmarks_arr = landmarks_arr.reshape(1, 5, 2)
+    
+    best_idx = int(np.argmax(probs_arr))
+    
+    # 🚨 STRICT ENROLLMENT GATE
+    if probs_arr[best_idx] < 0.99:
+        raise HTTPException(status_code=400, detail=f"Face too unclear ({probs_arr[best_idx]:.2f}). Ask student to look directly at camera.")
+    
+    # Frontal check (slightly relaxed for enrollment since teacher is supervising)
+    lm = landmarks_arr[best_idx]
+    left_eye, right_eye, nose = lm[0], lm[1], lm[2]
+    dist_left = np.linalg.norm(nose - left_eye)
+    dist_right = np.linalg.norm(nose - right_eye)
+    symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
+    
+    if symmetry < 0.80:
+        raise HTTPException(status_code=400, detail=f"Face not frontal enough ({symmetry:.2f}). Ask student to face camera.")
+    
+    # Extract
+    best_box = boxes_arr[best_idx:best_idx+1]
+    extracted = mtcnn.extract(head_crop, best_box, save_path=None)
+    
+    if extracted is None:
+        face_tensors = []
+    elif isinstance(extracted, torch.Tensor):
+        face_tensors = [extracted]
+    else:
+        face_tensors = extracted
+    
+    if len(face_tensors) == 0:
+        raise HTTPException(status_code=400, detail="Face extraction failed.")
+    
+    face_tensor = face_tensors[0]
     with torch.no_grad():
         emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
-
-    if p.student_id not in global_face_db: global_face_db[p.student_id] = {"name": p.student_name, "embeddings":[]}
-    global_face_db[p.student_id]["embeddings"].append(emb.tolist())
+    
+    # Initialize if new student
+    if p.student_id not in global_face_db:
+        global_face_db[p.student_id] = {"name": p.student_name, "embeddings": []}
+    
+    existing = global_face_db[p.student_id]["embeddings"]
+    
+    # 🎯 ENROLLMENT REDUNDANCY: Don't save near-duplicates
+    if len(existing) > 0:
+        sims = [cosine_similarity(emb.tolist(), e) for e in existing]
+        if max(sims) > 0.90:
+            return {
+                "status": "success",
+                "message": f"{p.student_name} already enrolled with similar angle. No new data saved.",
+                "quality": "redundant",
+                "symmetry": round(symmetry, 3),
+                "confidence": round(float(probs_arr[best_idx]), 3)
+            }
+    
+    # Save the high-quality seed
+    existing.append(emb.tolist())
     save_face_db(global_face_db)
-
+    
+    # Clear tracker so next frame recognizes immediately
     global live_tracker_memory
     live_tracker_memory.clear()
-    return {"status": "success", "message": "Face Enrolled Successfully!"}
+    
+    return {
+        "status": "success",
+        "message": f"✅ {p.student_name} enrolled with high-quality frontal embedding.",
+        "quality": "excellent",
+        "symmetry": round(symmetry, 3),
+        "confidence": round(float(probs_arr[best_idx]), 3),
+        "total_embeddings": len(existing)
+    }
 
 # =========================================================
 # EXCEL EXPORT (RESTORED)

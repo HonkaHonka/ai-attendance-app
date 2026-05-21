@@ -307,7 +307,8 @@ function App() {
         
         // CSS Zoom Origin
         const originX = ((x + w / 2) / AI_W) * 100;
-        const originY = ((y + h / 2) / AI_H) * 100;
+        const originY = ((y + h * 0.25) / AI_H) * 100;  // 🎯 Face is in upper 25% of body box
+
 
         setLiveZoom({
            origBox: face.box,
