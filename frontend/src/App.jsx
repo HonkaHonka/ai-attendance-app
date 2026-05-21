@@ -258,7 +258,7 @@ function App() {
   },[detectedFaces]);
 
   // 🔍 INSPECT CANVAS RENDERER (right-click zoom) - NO CSS TRANSFORM
-    useEffect(() => {
+      useEffect(() => {
     let animId;
     
     const drawInspect = () => {
@@ -271,24 +271,33 @@ function App() {
       const canvas = inspectCanvasRef.current;
       const ctx = canvas.getContext('2d');
       
-      const { box, faceBox, scale, videoW, videoH } = inspectMode;
+      const { scale, videoW, videoH } = inspectMode;
+      
+      // 🎯 LIVE TRACKING: Find the current face_box from WebSocket data
+      const liveFace = detectedFaces.find(f => 
+        f.box[0] === inspectMode.box[0] && 
+        f.box[1] === inspectMode.box[1]
+      );
+      
+      // Use live face_box if available, else frozen one
+      const currentFaceBox = liveFace?.face_box || inspectMode.faceBox;
       
       const outputW = 640;
       const outputH = 480;
       
-      // 🎯 Source crop size in VIDEO coordinates
+      // Source crop size in VIDEO coordinates
       const srcW = (outputW / scale) * (videoW / AI_W);
       const srcH = (outputH / scale) * (videoH / AI_H);
       
-      // 🎯 Center point in VIDEO coordinates
+      // Center point in VIDEO coordinates
       let centerX, centerY;
-      if (faceBox) {
-        centerX = faceBox[0] + faceBox[2] / 2;
-        centerY = faceBox[1] + faceBox[3] / 2;
+      if (currentFaceBox) {
+        // Convert face_box from AI to video coords
+        centerX = (currentFaceBox[0] + currentFaceBox[2] / 2) * (videoW / AI_W);
+        centerY = (currentFaceBox[1] + currentFaceBox[3] / 2) * (videoH / AI_H);
       } else {
-        // Fallback: convert body box center from AI to video
-        centerX = (box[0] + box[2] / 2) * (videoW / AI_W);
-        centerY = (box[1] + box[3] / 2) * (videoH / AI_H);
+        centerX = (inspectMode.box[0] + inspectMode.box[2] / 2) * (videoW / AI_W);
+        centerY = (inspectMode.box[1] + inspectMode.box[3] / 2) * (videoH / AI_H);
       }
       
       const srcX = Math.max(0, Math.min(videoW - srcW, centerX - srcW / 2));
@@ -298,13 +307,13 @@ function App() {
       canvas.height = outputH;
       ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outputW, outputH);
       
-      // 🎯 Draw face outline in inspect canvas coordinates
-      if (faceBox) {
-        const [fx, fy, fw, fh] = faceBox;
-        const sx = (fx - srcX) * (outputW / srcW);
-        const sy = (fy - srcY) * (outputH / srcH);
-        const sw = fw * (outputW / srcW);
-        const sh = fh * (outputH / srcH);
+      // Draw face outline
+      if (currentFaceBox) {
+        const [fx, fy, fw, fh] = currentFaceBox;
+        const sx = ((fx * (videoW / AI_W)) - srcX) * (outputW / srcW);
+        const sy = ((fy * (videoH / AI_H)) - srcY) * (outputH / srcH);
+        const sw = fw * (videoW / AI_W) * (outputW / srcW);
+        const sh = fh * (videoH / AI_H) * (outputH / srcH);
         ctx.strokeStyle = '#00ff00';
         ctx.lineWidth = 3;
         ctx.strokeRect(sx, sy, sw, sh);
@@ -315,12 +324,12 @@ function App() {
     
     drawInspect();
     return () => cancelAnimationFrame(animId);
-  }, [inspectMode]);
+  }, [inspectMode, detectedFaces]);  // 🎯 Added detectedFaces dependency
 
   // ==========================================
   // MOUSE HANDLERS
   // ==========================================
-  const handleCanvasClick = (e) => {
+    const handleCanvasClick = (e) => {
     if (e.button !== 0) return;
 
     const canvas = canvasRef.current;
@@ -348,8 +357,11 @@ function App() {
         tempCanvas.height = AI_H;
         tempCanvas.getContext('2d').drawImage(video, 0, 0, AI_W, AI_H);
         
-        setQuickEnrollData({ image: tempCanvas.toDataURL('image/jpeg', 0.8), box: face.box });
-        setLiveZoom({ origBox: face.box });
+        // 🎯 Use face_box if available for more accurate assignment
+        const assignBox = face.face_box || face.box;
+        
+        setQuickEnrollData({ image: tempCanvas.toDataURL('image/jpeg', 0.8), box: assignBox });
+        setLiveZoom({ origBox: assignBox });
       }
     });
   };
@@ -418,25 +430,34 @@ function App() {
     }));
   };
 
-    const assignFromInspect = () => {
+      const assignFromInspect = () => {
     if (!inspectMode) return;
     
-    const canvas = inspectCanvasRef.current;
-    if (!canvas) return;
+    const video = surveillanceWebcamRef.current?.video;
+    if (!video || video.readyState < 2) return;
     
-    // 🎯 Use the displayed crop as the assignment image
-    // The box sent to backend should be the FACE box if available, else body box
-    const assignBox = inspectMode.faceBox 
-      ? [
-          Math.round(inspectMode.faceBox[0] * (AI_W / inspectMode.videoW)),
-          Math.round(inspectMode.faceBox[1] * (AI_H / inspectMode.videoH)),
-          Math.round(inspectMode.faceBox[2] * (AI_W / inspectMode.videoW)),
-          Math.round(inspectMode.faceBox[3] * (AI_H / inspectMode.videoH))
-        ]
-      : inspectMode.box;
+    // 🎯 Capture FULL 1280×720 frame (same as AI processing)
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = AI_W;
+    tempCanvas.height = AI_H;
+    tempCanvas.getContext('2d').drawImage(video, 0, 0, AI_W, AI_H);
+    
+    // 🎯 Convert face_box from VIDEO coords back to AI coords
+    let assignBox;
+    if (inspectMode.faceBox) {
+      const [vx, vy, vw, vh] = inspectMode.faceBox;
+      assignBox = [
+        Math.round(vx * (AI_W / inspectMode.videoW)),
+        Math.round(vy * (AI_H / inspectMode.videoH)),
+        Math.round(vw * (AI_W / inspectMode.videoW)),
+        Math.round(vh * (AI_H / inspectMode.videoH))
+      ];
+    } else {
+      assignBox = inspectMode.box;
+    }
     
     setQuickEnrollData({ 
-      image: canvas.toDataURL('image/jpeg', 0.8),
+      image: tempCanvas.toDataURL('image/jpeg', 0.8),
       box: assignBox 
     });
     setLiveZoom({ origBox: assignBox });
