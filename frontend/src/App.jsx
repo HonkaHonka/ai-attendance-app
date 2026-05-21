@@ -258,7 +258,8 @@ function App() {
   },[detectedFaces]);
 
   // 🔍 INSPECT CANVAS RENDERER (right-click zoom) - NO CSS TRANSFORM
-      useEffect(() => {
+        // 🔍 INSPECT CANVAS RENDERER (right-click zoom) - NO CSS TRANSFORM
+  useEffect(() => {
     let animId;
     
     const drawInspect = () => {
@@ -271,49 +272,65 @@ function App() {
       const canvas = inspectCanvasRef.current;
       const ctx = canvas.getContext('2d');
       
-      const { scale, videoW, videoH } = inspectMode;
+      // 🎯 LIVE video dimensions (not cached)
+      const vidW = video.videoWidth || 1920;
+      const vidH = video.videoHeight || 1080;
       
-      // 🎯 LIVE TRACKING: Find the current face_box from WebSocket data
-      const liveFace = detectedFaces.find(f => 
-        f.box[0] === inspectMode.box[0] && 
-        f.box[1] === inspectMode.box[1]
-      );
+      const { scale } = inspectMode;
       
-      // Use live face_box if available, else frozen one
-      const currentFaceBox = liveFace?.face_box || inspectMode.faceBox;
+      // 🎯 LIVE TRACKING: Find current face_box by track_id or tolerant box match
+      let currentFaceBox = null;
+      let currentBodyBox = null;
+      
+      // Try to match by exact box coordinates first (with 5px tolerance)
+      const liveFace = detectedFaces.find(f => {
+        const [fx, fy, fw, fh] = f.box;
+        const [ix, iy, iw, ih] = inspectMode.box;
+        return Math.abs(fx - ix) < 5 && Math.abs(fy - iy) < 5;
+      });
+      
+      if (liveFace) {
+        currentBodyBox = liveFace.box;
+        currentFaceBox = liveFace.face_box || null;
+      } else {
+        // Fallback: use frozen data
+        currentBodyBox = inspectMode.box;
+        currentFaceBox = inspectMode.faceBox || null;
+      }
       
       const outputW = 640;
       const outputH = 480;
       
       // Source crop size in VIDEO coordinates
-      const srcW = (outputW / scale) * (videoW / AI_W);
-      const srcH = (outputH / scale) * (videoH / AI_H);
+      const srcW = (outputW / scale) * (vidW / AI_W);
+      const srcH = (outputH / scale) * (vidH / AI_H);
       
-      // Center point in VIDEO coordinates
+      // 🎯 Center point: use face_box if available, else body box upper 25%
       let centerX, centerY;
       if (currentFaceBox) {
-        // Convert face_box from AI to video coords
-        centerX = (currentFaceBox[0] + currentFaceBox[2] / 2) * (videoW / AI_W);
-        centerY = (currentFaceBox[1] + currentFaceBox[3] / 2) * (videoH / AI_H);
+        // face_box is in AI coordinates, convert to video
+        centerX = (currentFaceBox[0] + currentFaceBox[2] / 2) * (vidW / AI_W);
+        centerY = (currentFaceBox[1] + currentFaceBox[3] / 2) * (vidH / AI_H);
       } else {
-        centerX = (inspectMode.box[0] + inspectMode.box[2] / 2) * (videoW / AI_W);
-        centerY = (inspectMode.box[1] + inspectMode.box[3] / 2) * (videoH / AI_H);
+        // Face is in upper 25% of body box
+        centerX = (currentBodyBox[0] + currentBodyBox[2] / 2) * (vidW / AI_W);
+        centerY = (currentBodyBox[1] + currentBodyBox[3] * 0.25) * (vidH / AI_H);
       }
       
-      const srcX = Math.max(0, Math.min(videoW - srcW, centerX - srcW / 2));
-      const srcY = Math.max(0, Math.min(videoH - srcH, centerY - srcH / 2));
+      const srcX = Math.max(0, Math.min(vidW - srcW, centerX - srcW / 2));
+      const srcY = Math.max(0, Math.min(vidH - srcH, centerY - srcH / 2));
       
       canvas.width = outputW;
       canvas.height = outputH;
       ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outputW, outputH);
       
-      // Draw face outline
+      // 🎯 Draw face outline in inspect canvas coordinates
       if (currentFaceBox) {
         const [fx, fy, fw, fh] = currentFaceBox;
-        const sx = ((fx * (videoW / AI_W)) - srcX) * (outputW / srcW);
-        const sy = ((fy * (videoH / AI_H)) - srcY) * (outputH / srcH);
-        const sw = fw * (videoW / AI_W) * (outputW / srcW);
-        const sh = fh * (videoH / AI_H) * (outputH / srcH);
+        const sx = ((fx * (vidW / AI_W)) - srcX) * (outputW / srcW);
+        const sy = ((fy * (vidH / AI_H)) - srcY) * (outputH / srcH);
+        const sw = fw * (vidW / AI_W) * (outputW / srcW);
+        const sh = fh * (vidH / AI_H) * (outputH / srcH);
         ctx.strokeStyle = '#00ff00';
         ctx.lineWidth = 3;
         ctx.strokeRect(sx, sy, sw, sh);
@@ -324,7 +341,7 @@ function App() {
     
     drawInspect();
     return () => cancelAnimationFrame(animId);
-  }, [inspectMode, detectedFaces]);  // 🎯 Added detectedFaces dependency
+  }, [inspectMode, detectedFaces]);
 
   // ==========================================
   // MOUSE HANDLERS
@@ -366,21 +383,19 @@ function App() {
     });
   };
 
-    const handleCanvasRightClick = (e) => {
+      const handleCanvasRightClick = (e) => {
     e.preventDefault();
 
     const canvas = canvasRef.current;
     if (!canvas) return;
     
     const rect = canvas.getBoundingClientRect();
-    // 🎯 Map click to AI canvas coordinates (1280x720)
     const clickX_AI = (e.clientX - rect.left) * (AI_W / rect.width);
     const clickY_AI = (e.clientY - rect.top) * (AI_H / rect.height);
 
     detectedFaces.forEach(face => {
       const [x, y, w, h] = face.box;
       
-      // Hit test in AI coordinates
       if (clickX_AI >= x && clickX_AI <= x + w && clickY_AI >= y && clickY_AI <= y + h) {
         const boxArea = w * h;
         const canvasArea = AI_W * AI_H;
@@ -391,30 +406,12 @@ function App() {
         else if (ratio < 0.04) zoomScale = 2.0;
         else zoomScale = 1.3;
         
-        // 🎯 Convert face_box from AI coords to VIDEO coords for accurate crop
-        const video = surveillanceWebcamRef.current?.video;
-        const vidW = video?.videoWidth || AI_W;
-        const vidH = video?.videoHeight || AI_H;
-        
-        const scaleToVideo = vidW / AI_W;
-        
-        let videoFaceBox = null;
-        if (face.face_box) {
-          const [fx, fy, fw, fh] = face.face_box;
-          videoFaceBox = [
-            fx * scaleToVideo,
-            fy * scaleToVideo,
-            fw * scaleToVideo,
-            fh * scaleToVideo
-          ];
-        }
-        
+        // 🎯 Store face_box in AI coordinates (same as backend sends it)
         setInspectMode({
-          box: face.box,           // AI coords (for reference)
-          faceBox: videoFaceBox,   // VIDEO coords (for accurate crop)
-          scale: zoomScale,
-          videoW: vidW,
-          videoH: vidH
+          box: face.box,           // AI coords
+          faceBox: face.face_box || null,  // AI coords (already correct from backend)
+          scale: zoomScale
+          // NO videoW/videoH - read live from video element instead
         });
       }
     });
