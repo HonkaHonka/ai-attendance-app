@@ -321,7 +321,8 @@ def process_frame(image_b64):
             f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
             
             face_found = False
-
+            face_abs_box = None
+            
             if f_boxes is not None and len(f_boxes) > 0 and f_boxes[0] is not None:
                 boxes_raw   = f_boxes[0]
                 probs_raw   = f_probs[0]
@@ -345,6 +346,15 @@ def process_frame(image_b64):
                     
                     if probs_arr[best_idx] > 0.90:
                         face_found = True
+                        
+                        # 🎯 ABSOLUTE FACE BOX for frontend zoom centering
+                        fb = boxes_arr[best_idx]
+                        face_abs_box = [
+                            int(hx1 + fb[0]),
+                            int(hy1 + fb[1]),
+                            int(fb[2] - fb[0]),
+                            int(fb[3] - fb[1])
+                        ]
                         person["frames_no_face"] = 0
 
                         best_box = boxes_arr[best_idx:best_idx+1]
@@ -426,12 +436,15 @@ def process_frame(image_b64):
             current_frame_tracks[track_id] = person
 
             if person["status"] != "no_face":
-                faces_out.append({
+                face_out = {
                     "box": [x1, y1, x2 - x1, y2 - y1],
                     "student_id": person["student_id"],
                     "name": person["name"],
                     "status": person["status"]
-                })
+                }
+                if face_abs_box:
+                    face_out["face_box"] = face_abs_box
+                faces_out.append(face_out)
 
     # --- TTL Tracker Memory ---
     for tid, tdata in current_frame_tracks.items():
@@ -445,7 +458,7 @@ def process_frame(image_b64):
     if save_required:
         save_face_db(global_face_db)
 
-        # --- MEMORY LEAK MONITOR ---
+    # --- MEMORY LEAK MONITOR ---
     if not hasattr(process_frame, "_last_mem_report"):
         process_frame._last_mem_report = 0
     if current_time - process_frame._last_mem_report > 10:
