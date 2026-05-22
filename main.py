@@ -488,7 +488,8 @@ class AssignPayload(BaseModel):
     student_id: str
     student_name: str
     image: str
-    box: list
+    box: list = None
+    is_manual: bool = False
 
 @app.post("/api/assign-face")
 def assign_face(p: AssignPayload):
@@ -499,22 +500,29 @@ def assign_face(p: AssignPayload):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image data.")
     
-    x, y, w, h = map(int, p.box)
+    # 🎯 MANUAL ZOOM: image is already a magnified face crop
+    if p.is_manual or not p.box:
+        # Resize if the frontend sent a huge canvas
+        if max(img.size) > 1200:
+            img.thumbnail((800, 800))
+        head_crop = img
+    else:
+        # 🎯 YOLO TRACKING: existing body-box to head-crop logic
+        x, y, w, h = map(int, p.box)
+        head_h = int(h * 0.50)
+        hx1 = max(0, x - 20)
+        hy1 = max(0, y - 20)
+        hx2 = min(img.width, x + w + 20)
+        hy2 = min(img.height, y + head_h + 20)
+        
+        if hx2 <= hx1 or hy2 <= hy1:
+            raise HTTPException(status_code=400, detail="Invalid face region.")
+        
+        head_crop = img.crop((hx1, hy1, hx2, hy2))
     
-    # Head ROI (same logic as surveillance)
-    head_h = int(h * 0.50)
-    hx1 = max(0, x - 20)
-    hy1 = max(0, y - 20)
-    hx2 = min(img.width, x + w + 20)
-    hy2 = min(img.height, y + head_h + 20)
-    
-    if hx2 <= hx1 or hy2 <= hy1:
-        raise HTTPException(status_code=400, detail="Invalid face region.")
-    
-    head_crop = img.crop((hx1, hy1, hx2, hy2))
-    
-    # Robust detect + landmarks
+    # --- everything below this point stays exactly the same ---
     f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
+    
     
     if f_boxes is None or len(f_boxes) == 0 or f_boxes[0] is None:
         raise HTTPException(status_code=400, detail="No face detected. Ask student to look at camera.")
@@ -565,9 +573,13 @@ def assign_face(p: AssignPayload):
         emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
     
     # 🛡️ DUPLICATE FACE CHECK: Does this face already belong to someone?
-    DUPLICATE_THRESHOLD = 0.75  # If similarity > 0.75, it's likely the same person
+    DUPLICATE_THRESHOLD = 0.75
     
     for existing_id, existing_data in global_face_db.items():
+        # Skip self — same student can get more angles
+        if existing_id == p.student_id:
+            continue
+            
         for saved_emb in existing_data["embeddings"]:
             sim = cosine_similarity(emb.tolist(), saved_emb)
             if sim > DUPLICATE_THRESHOLD:

@@ -5,7 +5,7 @@ import './App.css';
 const API_BASE = "http://127.0.0.1:8000/api";
 const WS_BASE = "ws://127.0.0.1:8000/ws";
 
-// 🚀 Camera constraints - use 1080p to prevent Windows auto-zoom triggering 4K
+// Camera constraints
 const SURVEILLANCE_CONSTRAINTS = {
   facingMode: "user",
   width: { ideal: 1920 },
@@ -21,6 +21,9 @@ const AI_W = 1280;
 const AI_H = 720;
 
 function App() {
+  // ==========================================
+  // STATE
+  // ==========================================
   const [view, setView] = useState('login'); 
   const [email, setEmail] = useState('');
   const [facultyName, setFacultyName] = useState('');
@@ -29,10 +32,7 @@ function App() {
   const [selectedClass, setSelectedClass] = useState('');
   const [error, setError] = useState('');
 
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [enrollStep, setEnrollStep] = useState(''); 
-  const [capturedImages, setCapturedImages] = useState({});
-  const [isCapturing, setIsCapturing] = useState(false); 
+  // REMOVED: isModalOpen, enrollStep, capturedImages, isCapturing — live feed only
   
   const [isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
   const [verifyResult, setVerifyResult] = useState('');
@@ -44,7 +44,9 @@ function App() {
   const [quickEnrollData, setQuickEnrollData] = useState(null); 
   const [liveZoom, setLiveZoom] = useState(null); 
   const [inspectMode, setInspectMode] = useState(null);
-  
+  const [wheelZoom, setWheelZoom] = useState(null);
+
+  // REFS
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
@@ -106,51 +108,15 @@ function App() {
     } catch (error) { alert(`Error downloading report: ${error.message}`); }
   };
 
-  const startEnrollment = async (classNbr) => {
-    setSelectedClass(classNbr);
-    setCapturedImages({});
-    setEnrollStep('front'); 
-    setIsModalOpen(true); 
-    try {
-      const res = await fetch(`${API_BASE}/students?email=${encodeURIComponent(email)}&class_nbr=${classNbr}`);
-      setStudents(await res.json());
-    } catch (err) {}
-  };
-
-  const captureBurst = async () => {
-    setIsCapturing(true);
-    const frames = [];
-    for (let i = 0; i < 3; i++) {
-      const imageSrc = webcamRef.current.getScreenshot();
-      if (imageSrc) frames.push(imageSrc);
-      await new Promise(resolve => setTimeout(resolve, 300));
-    }
-    if (enrollStep === 'front') { setCapturedImages({ ...capturedImages, front: frames }); setEnrollStep('left'); } 
-    else if (enrollStep === 'left') { setCapturedImages({ ...capturedImages, left: frames }); setEnrollStep('right'); } 
-    else if (enrollStep === 'right') { setCapturedImages({ ...capturedImages, right: frames }); setEnrollStep('select_student'); }
-    setIsCapturing(false);
-  };
-
-  const assignFaceToStudent = async (studentId, studentName) => {
-    setEnrollStep('saving');
-    const payload = { student_id: String(studentId), student_name: studentName, class_nbr: String(selectedClass), images: capturedImages };
-    try {
-      const response = await fetch(`${API_BASE}/enroll-face`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || "Failed to process face");
-      alert(`✅ ${result.message}`);
-      setIsModalOpen(false); 
-    } catch (error) {
-      alert(`❌ AI Error: ${error.message}`);
-      setEnrollStep('select_student'); 
-    }
-  };
-
   const runVerificationScan = async () => {
     setVerifyResult('Scanning...');
     const imageSrc = webcamRef.current.getScreenshot();
     try {
-      const response = await fetch(`${API_BASE}/verify-face`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: imageSrc }) });
+      const response = await fetch(`${API_BASE}/verify-face`, { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ image: imageSrc }) 
+      });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail);
       
@@ -222,6 +188,7 @@ function App() {
     setLiveZoom(null);
     setQuickEnrollData(null);
     setInspectMode(null);
+    setWheelZoom(null);
   };
 
   useEffect(() => { return () => stopSurveillance(); },[]);
@@ -257,13 +224,14 @@ function App() {
     }
   },[detectedFaces]);
 
-  // 🔍 INSPECT CANVAS RENDERER (right-click zoom) - NO CSS TRANSFORM
-        // 🔍 INSPECT CANVAS RENDERER (right-click zoom) - NO CSS TRANSFORM
-    useEffect(() => {
+  // ==========================================
+  // INSPECT CANVAS RENDERER (right-click zoom)
+  // ==========================================
+  useEffect(() => {
     let animId;
     
     const drawInspect = () => {
-      if (!inspectMode || !inspectCanvasRef.current || !surveillanceWebcamRef.current?.video) {
+      if (!inspectMode || !surveillanceWebcamRef.current?.video || !inspectCanvasRef.current) {
         animId = requestAnimationFrame(drawInspect);
         return;
       }
@@ -272,63 +240,36 @@ function App() {
       const canvas = inspectCanvasRef.current;
       const ctx = canvas.getContext('2d');
       
-      // 🎯 LIVE video dimensions
       const vidW = video.videoWidth || 1920;
       const vidH = video.videoHeight || 1080;
       
-      const { scale, trackId } = inspectMode;
+      const liveFace = detectedFaces.find(f => f.track_id === inspectMode.trackId);
       
-      // 🎯 FIND BY TRACK_ID: Follow the person, not the position
-      const liveFace = detectedFaces.find(f => f.track_id === trackId);
+      let centerX = AI_W / 2;
+      let centerY = AI_H / 2;
       
-      if (!liveFace) {
-        // Person left frame or tracking lost - draw "TRACKING LOST" message
-        canvas.width = 640;
-        canvas.height = 480;
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, 640, 480);
-        ctx.fillStyle = '#ffcb05';
-        ctx.font = 'bold 24px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText('🔍 TRACKING LOST', 320, 240);
-        ctx.fillStyle = '#aaa';
-        ctx.font = '16px Arial';
-        ctx.fillText('Student moved out of frame', 320, 270);
-        
-        animId = requestAnimationFrame(drawInspect);
-        return;
+      if (liveFace) {
+        const [bx, by, bw, bh] = liveFace.box;
+        centerX = bx + bw / 2;
+        centerY = by + bh * 0.25;
       }
-      
-      const bodyBox = liveFace.box;
-      const faceBox = liveFace.face_box || null;
       
       const outputW = 640;
       const outputH = 480;
+      const scale = inspectMode.scale;
       
-      // Source crop size in VIDEO coordinates
       const srcW = (outputW / scale) * (vidW / AI_W);
       const srcH = (outputH / scale) * (vidH / AI_H);
       
-      // 🎯 Center on FACE (upper 25% of body if no face_box)
-      let centerX, centerY;
-      if (faceBox) {
-        centerX = (faceBox[0] + faceBox[2] / 2) * (vidW / AI_W);
-        centerY = (faceBox[1] + faceBox[3] / 2) * (vidH / AI_H);
-      } else {
-        centerX = (bodyBox[0] + bodyBox[2] / 2) * (vidW / AI_W);
-        centerY = (bodyBox[1] + bodyBox[3] * 0.25) * (vidH / AI_H);
-      }
-      
-      const srcX = Math.max(0, Math.min(vidW - srcW, centerX - srcW / 2));
-      const srcY = Math.max(0, Math.min(vidH - srcH, centerY - srcH / 2));
+      const srcX = Math.max(0, Math.min(vidW - srcW, (centerX * (vidW / AI_W)) - srcW / 2));
+      const srcY = Math.max(0, Math.min(vidH - srcH, (centerY * (vidH / AI_H)) - srcH / 2));
       
       canvas.width = outputW;
       canvas.height = outputH;
       ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outputW, outputH);
       
-      // 🎯 Draw face outline
-      if (faceBox) {
-        const [fx, fy, fw, fh] = faceBox;
+      if (liveFace) {
+        const [fx, fy, fw, fh] = liveFace.box;
         const sx = ((fx * (vidW / AI_W)) - srcX) * (outputW / srcW);
         const sy = ((fy * (vidH / AI_H)) - srcY) * (outputH / srcH);
         const sw = fw * (vidW / AI_W) * (outputW / srcW);
@@ -338,24 +279,86 @@ function App() {
         ctx.strokeRect(sx, sy, sw, sh);
       }
       
-      // 🎯 Draw body box outline (dim) to show tracking area
-      const [bx, by, bw, bh] = bodyBox;
-      const bsx = ((bx * (vidW / AI_W)) - srcX) * (outputW / srcW);
-      const bsy = ((by * (vidH / AI_H)) - srcY) * (outputH / srcH);
-      const bsw = bw * (vidW / AI_W) * (outputW / srcW);
-      const bsh = bh * (vidH / AI_H) * (outputH / srcH);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([5, 5]);
-      ctx.strokeRect(bsx, bsy, bsw, bsh);
-      ctx.setLineDash([]);
-      
       animId = requestAnimationFrame(drawInspect);
     };
     
     drawInspect();
     return () => cancelAnimationFrame(animId);
   }, [inspectMode, detectedFaces]);
+
+  // ==========================================
+  // WHEEL ZOOM RENDERER
+  // ==========================================
+  useEffect(() => {
+    let animId;
+    
+    const drawWheelZoom = () => {
+      if (!wheelZoom || !surveillanceWebcamRef.current?.video) {
+        animId = requestAnimationFrame(drawWheelZoom);
+        return;
+      }
+      
+      const video = surveillanceWebcamRef.current.video;
+      const vidW = video.videoWidth || 1920;
+      const vidH = video.videoHeight || 1080;
+      
+      const { centerX, centerY, scale, trackId } = wheelZoom;
+      
+      let liveFace = null;
+      if (trackId) {
+        liveFace = detectedFaces.find(f => f.track_id === trackId);
+      }
+      
+      let currentCenterX = centerX;
+      let currentCenterY = centerY;
+      
+      if (liveFace && liveFace.face_box) {
+        const [fx, fy, fw, fh] = liveFace.face_box;
+        currentCenterX = (fx + fw / 2);
+        currentCenterY = (fy + fh / 2);
+      } else if (liveFace) {
+        const [bx, by, bw, bh] = liveFace.box;
+        currentCenterX = (bx + bw / 2);
+        currentCenterY = (by + bh * 0.25);
+      }
+      
+      const zoomCanvas = document.getElementById('wheel-zoom-canvas');
+      if (!zoomCanvas) {
+        animId = requestAnimationFrame(drawWheelZoom);
+        return;
+      }
+      
+      const ctx = zoomCanvas.getContext('2d');
+      const outputW = 640;
+      const outputH = 480;
+      
+      const srcW = (outputW / scale) * (vidW / AI_W);
+      const srcH = (outputH / scale) * (vidH / AI_H);
+      
+      const srcX = Math.max(0, Math.min(vidW - srcW, (currentCenterX * (vidW / AI_W)) - srcW / 2));
+      const srcY = Math.max(0, Math.min(vidH - srcH, (currentCenterY * (vidH / AI_H)) - srcH / 2));
+      
+      zoomCanvas.width = outputW;
+      zoomCanvas.height = outputH;
+      ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outputW, outputH);
+      
+      if (liveFace && liveFace.face_box) {
+        const [fx, fy, fw, fh] = liveFace.face_box;
+        const sx = ((fx * (vidW / AI_W)) - srcX) * (outputW / srcW);
+        const sy = ((fy * (vidH / AI_H)) - srcY) * (outputH / srcH);
+        const sw = fw * (vidW / AI_W) * (outputW / srcW);
+        const sh = fh * (vidH / AI_H) * (outputH / srcH);
+        ctx.strokeStyle = '#00ff00';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(sx, sy, sw, sh);
+      }
+      
+      animId = requestAnimationFrame(drawWheelZoom);
+    };
+    
+    drawWheelZoom();
+    return () => cancelAnimationFrame(animId);
+  }, [wheelZoom, detectedFaces]);
 
   // ==========================================
   // MOUSE HANDLERS
@@ -388,16 +391,15 @@ function App() {
         tempCanvas.height = AI_H;
         tempCanvas.getContext('2d').drawImage(video, 0, 0, AI_W, AI_H);
         
-        // 🎯 Send BODY BOX — backend expects this for head crop
-        const assignBox = face.box;  // ← CHANGED from face.face_box || face.box
+        const assignBox = face.box;
         
-        setQuickEnrollData({ image: tempCanvas.toDataURL('image/jpeg', 0.8), box: assignBox });
-        setLiveZoom({ origBox: assignBox });
+        setQuickEnrollData({ image: tempCanvas.toDataURL('image/jpeg', 0.8), box: assignBox, isManual: false });
+        setLiveZoom({ origBox: assignBox, isManual: false });
       }
     });
   };
 
-        const handleCanvasRightClick = (e) => {
+  const handleCanvasRightClick = (e) => {
     e.preventDefault();
 
     const canvas = canvasRef.current;
@@ -421,21 +423,78 @@ function App() {
         else zoomScale = 1.3;
         
         setInspectMode({
-          trackId: face.track_id,  // 🎯 Store track_id, not box position
+          trackId: face.track_id,
           scale: zoomScale
         });
+        setWheelZoom(null);
       }
     });
   };
 
-  const handleInspectWheel = (e) => {
-    if (!inspectMode) return;
+  const handleCanvasWheel = (e) => {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.3 : -0.3;
-    setInspectMode(prev => ({
-      ...prev,
-      scale: Math.max(1.0, Math.min(4.0, prev.scale + delta))
-    }));
+    
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = (e.clientX - rect.left) * (AI_W / rect.width);
+    const mouseY = (e.clientY - rect.top) * (AI_H / rect.height);
+    
+    let targetFace = null;
+    for (const face of detectedFaces) {
+      const [x, y, w, h] = face.box;
+      if (mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h) {
+        targetFace = face;
+        break;
+      }
+    }
+    
+    if (e.deltaY < 0) {
+      if (targetFace) {
+        const boxArea = targetFace.box[2] * targetFace.box[3];
+        const canvasArea = AI_W * AI_H;
+        const ratio = boxArea / canvasArea;
+        
+        let zoomScale;
+        if (ratio < 0.015) zoomScale = 3.0;
+        else if (ratio < 0.04) zoomScale = 2.0;
+        else zoomScale = 1.3;
+        
+        setWheelZoom({
+          centerX: mouseX,
+          centerY: mouseY,
+          scale: zoomScale,
+          trackId: targetFace.track_id,
+          faceBox: targetFace.face_box || null
+        });
+        setInspectMode(null);
+      } else {
+        setWheelZoom({
+          centerX: mouseX,
+          centerY: mouseY,
+          scale: 2.5,
+          trackId: null,
+          faceBox: null
+        });
+      }
+    } else {
+      setWheelZoom(null);
+    }
+  };
+
+  // ==========================================
+  // CAPTURE & ASSIGNMENT LOGIC
+  // ==========================================
+  const captureManualZoom = () => {
+    const zoomCanvas = document.getElementById('wheel-zoom-canvas');
+    if (!zoomCanvas) return;
+    
+    const imageSrc = zoomCanvas.toDataURL('image/jpeg', 0.9);
+    
+    setQuickEnrollData({ image: imageSrc, box: null, isManual: true });
+    setLiveZoom({ origBox: null, isManual: true });
+    setWheelZoom(null);
   };
 
   const assignFromInspect = () => {
@@ -459,30 +518,31 @@ function App() {
     const ctx = tempCanvas.getContext('2d');
     ctx.drawImage(video, 0, 0, AI_W, AI_H);
     
-    // 🎯 Send BODY BOX (not face_box) — backend expects body box for head crop
-    const assignBox = liveFace.box;  // ← CHANGED from liveFace.face_box || liveFace.box
+    const assignBox = liveFace.box;
     
     setQuickEnrollData({ 
       image: tempCanvas.toDataURL('image/jpeg', 0.8),
-      box: assignBox 
+      box: assignBox,
+      isManual: false
     });
-    setLiveZoom({ origBox: assignBox });
+    setLiveZoom({ origBox: assignBox, isManual: false });
     setInspectMode(null);
   };
 
-        const assignLiveEnroll = async (studentId, studentName) => {
+  const assignLiveEnroll = async (studentId, studentName) => {
     try {
-      const box = liveZoom.origBox;
+      const payload = {
+        student_id: String(studentId),
+        student_name: studentName,
+        image: quickEnrollData.image,
+        box: quickEnrollData.box || null,
+        is_manual: quickEnrollData.isManual || false
+      };
 
       const response = await fetch(`${API_BASE}/assign-face`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            student_id: String(studentId),
-            student_name: studentName,
-            image: quickEnrollData.image,
-            box: box
-          })
+          body: JSON.stringify(payload)
       });
       
       let result;
@@ -496,10 +556,9 @@ function App() {
       
       if (!response.ok) throw new Error(result.detail || result.message || 'Assignment failed');
       
-      // 🛡️ Handle duplicate face error
       if (result.status === "error") {
         alert(`❌ ${result.message}`);
-        return; // Don't close panel, let teacher try someone else
+        return;
       }
       
       if (result.quality === "redundant") {
@@ -516,10 +575,12 @@ function App() {
     }
   };
 
-  const closeModal = () => setIsModalOpen(false);
-
+  // ==========================================
+  // RENDER
+  // ==========================================
   return (
     <div>
+      {/* TOP BAR */}
       <div className="top-bar">
         <div>✉ info@lu.ac.ae &nbsp;&nbsp; 📞 600 500606</div>
         <div className="top-bar-right"><span>Our Campuses</span> <span>LU Connect</span> <span>Library Portal</span></div>
@@ -529,6 +590,7 @@ function App() {
         <div className="nav-links"><a>Home</a><a>Study</a><a>Admissions</a><a>Research</a><a>Student Life</a><a>About Us</a></div>
       </nav>
 
+      {/* LOGIN */}
       {view === 'login' && (
         <div className="hero-section">
           <div className="login-card">
@@ -542,6 +604,7 @@ function App() {
         </div>
       )}
 
+      {/* CLASSES */}
       {view === 'classes' && (
         <div className="app-container">
           <div className="content-box">
@@ -561,8 +624,7 @@ function App() {
                     <tr key={idx} style={{ cursor: 'default' }}>
                       <td>{cls['Class Nbr']}</td><td>{cls['Semester']}</td><td>{cls['Course Code']}</td>
                       <td>{cls['Course Name']}</td><td>{cls['Start Time']}</td><td>{cls['Room ID']}</td>
-                      <td style={{textAlign: 'center', display: 'flex', gap: '10px', justifyContent: 'center'}}>
-                        <button className="btn-enroll-small" onClick={() => startEnrollment(cls['Class Nbr'])}>📷 Enroll Face</button>
+                      <td style={{textAlign: 'center'}}>
                         <button className="btn-enroll-small" style={{background: '#2f3254', color: 'white'}} onClick={() => fetchStudents(cls['Class Nbr'])}>📋 Check List</button>
                       </td>
                     </tr>
@@ -574,6 +636,7 @@ function App() {
         </div>
       )}
 
+      {/* STUDENTS */}
       {view === 'students' && (
         <div className="app-container">
           <div className="content-box">
@@ -588,7 +651,7 @@ function App() {
             
             <div style={{background: '#f8f9fa', padding: '30px', borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '30px', textAlign: 'center'}}>
               <h3 style={{marginTop: 0, color: 'var(--primary-dark)', fontSize: '24px'}}>🎥 Live Classroom Surveillance</h3>
-              <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>YOLOv8 + PyTorch crowd tracking. <b>Left-click Red boxes to assign</b> | <b>Right-click to inspect/zoom</b></p>
+              <p style={{color: '#666', fontSize: '16px', marginBottom: '20px'}}>YOLOv8 + PyTorch crowd tracking. <b>Left-click Red boxes to assign</b> | <b>Right-click to inspect/zoom</b> | <b>Mouse wheel to dynamic zoom</b></p>
               <button style={{background: '#2f3254', color: 'white', padding: '15px 40px', borderRadius: '30px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 10px rgba(0,0,0,0.2)'}} onClick={toggleSurveillance}>
                 ▶ Launch Full-Screen Tracker
               </button>
@@ -632,7 +695,7 @@ function App() {
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column' }}>
           
           <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
-            <h2 style={{ margin: 0, color: 'var(--accent-gold)' }}>🔴 Live Classroom Tracking</h2>
+            <h2 style={{ margin: 0, color: '#ffcb05' }}>🔴 Live Classroom Tracking</h2>
             <button onClick={stopSurveillance} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
               Close Tracker
             </button>
@@ -640,7 +703,6 @@ function App() {
 
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
             
-            {/* NO CSS TRANSFORM - pure canvas crop for performance */}
             <div style={{ position: 'relative', width: '100%', maxHeight: '100%', aspectRatio: '16/9', display: 'flex', justifyContent: 'center' }}>
               <Webcam 
                 ref={surveillanceWebcamRef} 
@@ -656,12 +718,12 @@ function App() {
                 height={AI_H}
                 onClick={handleCanvasClick}
                 onContextMenu={handleCanvasRightClick}
-                onWheel={handleInspectWheel}
+                onWheel={handleCanvasWheel}
                 style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 10, cursor: 'crosshair' }} 
               />
             </div>
 
-            {/* 🔍 INSPECT OVERLAY - Canvas crop zoom, NO CSS transform */}
+            {/* 🔍 INSPECT OVERLAY */}
             {inspectMode && (
               <div style={{
                 position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
@@ -698,21 +760,76 @@ function App() {
               </div>
             )}
 
-            {/* RIGHT PANEL - Assignment (opens on left click) */}
+            {/* 🖱️ WHEEL ZOOM OVERLAY — ADDED */}
+            {wheelZoom && (
+              <div style={{
+                position: 'absolute',
+                bottom: '20px',
+                right: '20px',
+                width: '640px',
+                height: '520px',
+                background: 'rgba(0,0,0,0.95)',
+                border: '3px solid #ffcb05',
+                borderRadius: '12px',
+                zIndex: 3500,
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.9)'
+              }}>
+                <canvas 
+                  id="wheel-zoom-canvas" 
+                  width={640} 
+                  height={480} 
+                  style={{ width: '100%', height: '480px', display: 'block', cursor: 'crosshair' }} 
+                />
+                <div style={{
+                  padding: '12px',
+                  background: '#1a1a2e',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <span style={{ color: '#ffcb05', fontWeight: 'bold', fontSize: '14px' }}>
+                    {wheelZoom.trackId ? `🔍 Tracking: ${wheelZoom.scale.toFixed(1)}x` : '🎯 Manual Zoom Area'}
+                  </span>
+                  <div style={{ display: 'flex', gap: '10px' }}>
+                    {!wheelZoom.trackId && (
+                      <button onClick={captureManualZoom} style={{
+                        background: '#28a745', color: 'white', border: 'none',
+                        padding: '8px 18px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold'
+                      }}>
+                        📷 Capture Face
+                      </button>
+                    )}
+                    <button onClick={() => setWheelZoom(null)} style={{
+                      background: '#dc3545', color: 'white', border: 'none',
+                      padding: '8px 18px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold'
+                    }}>
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* RIGHT PANEL — Live Enroll Assignment */}
             {liveZoom && (
               <div style={{ 
                 position: 'absolute', right: 0, top: 0, width: '400px', height: '100%', 
                 background: 'rgba(20,20,30,0.95)', zIndex: 4000, padding: '20px', 
-                borderLeft: '4px solid var(--accent-gold)', display: 'flex', flexDirection: 'column'
+                borderLeft: '4px solid #ffcb05', display: 'flex', flexDirection: 'column'
               }}>
                 <h2 style={{color: 'white', marginTop: 0}}>⚡ Live Enroll</h2>
-                <p style={{color: '#aaa', fontSize: '14px', marginBottom: '20px'}}>Click student name to register their face DNA!</p>
+                <p style={{color: '#aaa', fontSize: '14px', marginBottom: '20px'}}>
+                  {liveZoom.isManual ? '🎯 Manual zoom capture. Select student to register face DNA.' : 'Click student name to register their face DNA!'}
+                </p>
                 
                 <div className="student-select-list" style={{flex: 1, border: '1px solid #444', borderRadius: '8px', background: '#2a2a3c', overflowY: 'auto', padding: '10px'}}>
                   {students.map((student, idx) => (
                     <div key={idx} className="student-select-item" style={{borderBottomColor: '#444', color: 'white'}} onClick={() => assignLiveEnroll(student['Student ID'], student['Student Name'])}>
                       <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
-                      <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
+                      <span style={{color: '#ffcb05'}}>Assign ➔</span>
                     </div>
                   ))}
                 </div>
@@ -738,51 +855,6 @@ function App() {
             <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
             <button className="btn-capture" onClick={runVerificationScan}>🔍 Scan Face</button>
             <button className="btn-cancel" onClick={() => setIsVerifyModalOpen(false)}>Close</button>
-          </div>
-        </div>
-      )}
-
-      {/* ---------------- ENROLLMENT MODAL (9-Image Burst) ---------------- */}
-      {isModalOpen && (
-        <div className="modal-overlay">
-          <div className="modal-content">
-            <h2 className="modal-header">Biometric Enrollment</h2>
-            {(enrollStep === 'front' || enrollStep === 'left' || enrollStep === 'right') && (
-              <>
-                <p>Please align the student's face within the oval.</p>
-                <div className="webcam-container">
-                  <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={ENROLL_CONSTRAINTS} />
-                  <div className="webcam-mask"></div>
-                  <div className="webcam-overlay-text">
-                    {enrollStep === 'front' && "👤 Look straight into the camera"}
-                    {enrollStep === 'left' && "⬅️ Turn head slightly to the LEFT"}
-                    {enrollStep === 'right' && "➡️ Turn head slightly to the RIGHT"}
-                  </div>
-                </div>
-                <button className="btn-capture" onClick={captureBurst} disabled={isCapturing} style={{ opacity: isCapturing ? 0.7 : 1 }}>
-                  {isCapturing ? "📸 Capturing Burst..." : "📸 Capture Image"}
-                </button>
-                <button className="btn-cancel" onClick={closeModal}>Cancel</button>
-              </>
-            )}
-            {enrollStep === 'select_student' && (
-              <>
-                <h3>✅ Burst Images Captured!</h3>
-                <p>Who is this student? Select their name below:</p>
-                <div className="student-select-list">
-                  {students.map((student, idx) => (
-                    <div key={idx} className="student-select-item" onClick={() => assignFaceToStudent(student['Student ID'], student['Student Name'])}>
-                      <span><b>{student['Student ID']}</b> - {student['Student Name']}</span>
-                      <span style={{color: 'var(--accent-gold)'}}>Assign ➔</span>
-                    </div>
-                  ))}
-                </div>
-                <button className="btn-cancel" onClick={closeModal}>Cancel</button>
-              </>
-            )}
-            {enrollStep === 'saving' && (
-              <div style={{padding: '50px'}}><h3>⏳ Extracting Face DNA...</h3><p>AI is processing 9 captured frames...</p></div>
-            )}
           </div>
         </div>
       )}
