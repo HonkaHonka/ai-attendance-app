@@ -259,7 +259,7 @@ function App() {
 
   // 🔍 INSPECT CANVAS RENDERER (right-click zoom) - NO CSS TRANSFORM
         // 🔍 INSPECT CANVAS RENDERER (right-click zoom) - NO CSS TRANSFORM
-  useEffect(() => {
+    useEffect(() => {
     let animId;
     
     const drawInspect = () => {
@@ -272,31 +272,35 @@ function App() {
       const canvas = inspectCanvasRef.current;
       const ctx = canvas.getContext('2d');
       
-      // 🎯 LIVE video dimensions (not cached)
+      // 🎯 LIVE video dimensions
       const vidW = video.videoWidth || 1920;
       const vidH = video.videoHeight || 1080;
       
-      const { scale } = inspectMode;
+      const { scale, trackId } = inspectMode;
       
-      // 🎯 LIVE TRACKING: Find current face_box by track_id or tolerant box match
-      let currentFaceBox = null;
-      let currentBodyBox = null;
+      // 🎯 FIND BY TRACK_ID: Follow the person, not the position
+      const liveFace = detectedFaces.find(f => f.track_id === trackId);
       
-      // Try to match by exact box coordinates first (with 5px tolerance)
-      const liveFace = detectedFaces.find(f => {
-        const [fx, fy, fw, fh] = f.box;
-        const [ix, iy, iw, ih] = inspectMode.box;
-        return Math.abs(fx - ix) < 5 && Math.abs(fy - iy) < 5;
-      });
-      
-      if (liveFace) {
-        currentBodyBox = liveFace.box;
-        currentFaceBox = liveFace.face_box || null;
-      } else {
-        // Fallback: use frozen data
-        currentBodyBox = inspectMode.box;
-        currentFaceBox = inspectMode.faceBox || null;
+      if (!liveFace) {
+        // Person left frame or tracking lost - draw "TRACKING LOST" message
+        canvas.width = 640;
+        canvas.height = 480;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, 640, 480);
+        ctx.fillStyle = '#ffcb05';
+        ctx.font = 'bold 24px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('🔍 TRACKING LOST', 320, 240);
+        ctx.fillStyle = '#aaa';
+        ctx.font = '16px Arial';
+        ctx.fillText('Student moved out of frame', 320, 270);
+        
+        animId = requestAnimationFrame(drawInspect);
+        return;
       }
+      
+      const bodyBox = liveFace.box;
+      const faceBox = liveFace.face_box || null;
       
       const outputW = 640;
       const outputH = 480;
@@ -305,16 +309,14 @@ function App() {
       const srcW = (outputW / scale) * (vidW / AI_W);
       const srcH = (outputH / scale) * (vidH / AI_H);
       
-      // 🎯 Center point: use face_box if available, else body box upper 25%
+      // 🎯 Center on FACE (upper 25% of body if no face_box)
       let centerX, centerY;
-      if (currentFaceBox) {
-        // face_box is in AI coordinates, convert to video
-        centerX = (currentFaceBox[0] + currentFaceBox[2] / 2) * (vidW / AI_W);
-        centerY = (currentFaceBox[1] + currentFaceBox[3] / 2) * (vidH / AI_H);
+      if (faceBox) {
+        centerX = (faceBox[0] + faceBox[2] / 2) * (vidW / AI_W);
+        centerY = (faceBox[1] + faceBox[3] / 2) * (vidH / AI_H);
       } else {
-        // Face is in upper 25% of body box
-        centerX = (currentBodyBox[0] + currentBodyBox[2] / 2) * (vidW / AI_W);
-        centerY = (currentBodyBox[1] + currentBodyBox[3] * 0.25) * (vidH / AI_H);
+        centerX = (bodyBox[0] + bodyBox[2] / 2) * (vidW / AI_W);
+        centerY = (bodyBox[1] + bodyBox[3] * 0.25) * (vidH / AI_H);
       }
       
       const srcX = Math.max(0, Math.min(vidW - srcW, centerX - srcW / 2));
@@ -324,9 +326,9 @@ function App() {
       canvas.height = outputH;
       ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outputW, outputH);
       
-      // 🎯 Draw face outline in inspect canvas coordinates
-      if (currentFaceBox) {
-        const [fx, fy, fw, fh] = currentFaceBox;
+      // 🎯 Draw face outline
+      if (faceBox) {
+        const [fx, fy, fw, fh] = faceBox;
         const sx = ((fx * (vidW / AI_W)) - srcX) * (outputW / srcW);
         const sy = ((fy * (vidH / AI_H)) - srcY) * (outputH / srcH);
         const sw = fw * (vidW / AI_W) * (outputW / srcW);
@@ -335,6 +337,18 @@ function App() {
         ctx.lineWidth = 3;
         ctx.strokeRect(sx, sy, sw, sh);
       }
+      
+      // 🎯 Draw body box outline (dim) to show tracking area
+      const [bx, by, bw, bh] = bodyBox;
+      const bsx = ((bx * (vidW / AI_W)) - srcX) * (outputW / srcW);
+      const bsy = ((by * (vidH / AI_H)) - srcY) * (outputH / srcH);
+      const bsw = bw * (vidW / AI_W) * (outputW / srcW);
+      const bsh = bh * (vidH / AI_H) * (outputH / srcH);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 5]);
+      ctx.strokeRect(bsx, bsy, bsw, bsh);
+      ctx.setLineDash([]);
       
       animId = requestAnimationFrame(drawInspect);
     };
@@ -346,7 +360,7 @@ function App() {
   // ==========================================
   // MOUSE HANDLERS
   // ==========================================
-    const handleCanvasClick = (e) => {
+  const handleCanvasClick = (e) => {
     if (e.button !== 0) return;
 
     const canvas = canvasRef.current;
@@ -374,8 +388,8 @@ function App() {
         tempCanvas.height = AI_H;
         tempCanvas.getContext('2d').drawImage(video, 0, 0, AI_W, AI_H);
         
-        // 🎯 Use face_box if available for more accurate assignment
-        const assignBox = face.face_box || face.box;
+        // 🎯 Send BODY BOX — backend expects this for head crop
+        const assignBox = face.box;  // ← CHANGED from face.face_box || face.box
         
         setQuickEnrollData({ image: tempCanvas.toDataURL('image/jpeg', 0.8), box: assignBox });
         setLiveZoom({ origBox: assignBox });
@@ -383,7 +397,7 @@ function App() {
     });
   };
 
-      const handleCanvasRightClick = (e) => {
+        const handleCanvasRightClick = (e) => {
     e.preventDefault();
 
     const canvas = canvasRef.current;
@@ -406,12 +420,9 @@ function App() {
         else if (ratio < 0.04) zoomScale = 2.0;
         else zoomScale = 1.3;
         
-        // 🎯 Store face_box in AI coordinates (same as backend sends it)
         setInspectMode({
-          box: face.box,           // AI coords
-          faceBox: face.face_box || null,  // AI coords (already correct from backend)
+          trackId: face.track_id,  // 🎯 Store track_id, not box position
           scale: zoomScale
-          // NO videoW/videoH - read live from video element instead
         });
       }
     });
@@ -427,31 +438,29 @@ function App() {
     }));
   };
 
-      const assignFromInspect = () => {
+  const assignFromInspect = () => {
     if (!inspectMode) return;
     
-    const video = surveillanceWebcamRef.current?.video;
-    if (!video || video.readyState < 2) return;
+    const liveFace = detectedFaces.find(f => f.track_id === inspectMode.trackId);
+    if (!liveFace) {
+      alert('⚠️ Student moved out of frame. Please wait for them to reappear.');
+      return;
+    }
     
-    // 🎯 Capture FULL 1280×720 frame (same as AI processing)
+    const video = surveillanceWebcamRef.current?.video;
+    if (!video || video.readyState < 2) {
+      alert('⚠️ Camera not ready.');
+      return;
+    }
+    
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = AI_W;
     tempCanvas.height = AI_H;
-    tempCanvas.getContext('2d').drawImage(video, 0, 0, AI_W, AI_H);
+    const ctx = tempCanvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, AI_W, AI_H);
     
-    // 🎯 Convert face_box from VIDEO coords back to AI coords
-    let assignBox;
-    if (inspectMode.faceBox) {
-      const [vx, vy, vw, vh] = inspectMode.faceBox;
-      assignBox = [
-        Math.round(vx * (AI_W / inspectMode.videoW)),
-        Math.round(vy * (AI_H / inspectMode.videoH)),
-        Math.round(vw * (AI_W / inspectMode.videoW)),
-        Math.round(vh * (AI_H / inspectMode.videoH))
-      ];
-    } else {
-      assignBox = inspectMode.box;
-    }
+    // 🎯 Send BODY BOX (not face_box) — backend expects body box for head crop
+    const assignBox = liveFace.box;  // ← CHANGED from liveFace.face_box || liveFace.box
     
     setQuickEnrollData({ 
       image: tempCanvas.toDataURL('image/jpeg', 0.8),
@@ -461,11 +470,9 @@ function App() {
     setInspectMode(null);
   };
 
-  const assignLiveEnroll = async (studentId, studentName) => {
+        const assignLiveEnroll = async (studentId, studentName) => {
     try {
-      const [x, y, w, h] = liveZoom.origBox;
-      const pad = w * 0.3;
-      const expandedBox = [Math.max(0, x - pad), Math.max(0, y - pad), w + (pad * 2), h + (pad * 2)];
+      const box = liveZoom.origBox;
 
       const response = await fetch(`${API_BASE}/assign-face`, {
           method: 'POST',
@@ -474,11 +481,26 @@ function App() {
             student_id: String(studentId),
             student_name: studentName,
             image: quickEnrollData.image,
-            box: expandedBox 
+            box: box
           })
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || result.message);
+      
+      let result;
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        result = await response.json();
+      } else {
+        const text = await response.text();
+        throw new Error(text || `Server error: ${response.status}`);
+      }
+      
+      if (!response.ok) throw new Error(result.detail || result.message || 'Assignment failed');
+      
+      // 🛡️ Handle duplicate face error
+      if (result.status === "error") {
+        alert(`❌ ${result.message}`);
+        return; // Don't close panel, let teacher try someone else
+      }
       
       if (result.quality === "redundant") {
         alert(`ℹ️ ${result.message}`);

@@ -438,6 +438,7 @@ def process_frame(image_b64):
             if person["status"] != "no_face":
                 face_out = {
                     "box": [x1, y1, x2 - x1, y2 - y1],
+                    "track_id": track_id,  # 🎯 Send track_id so frontend can follow you
                     "student_id": person["student_id"],
                     "name": person["name"],
                     "status": person["status"]
@@ -535,7 +536,7 @@ def assign_face(p: AssignPayload):
     if probs_arr[best_idx] < 0.99:
         raise HTTPException(status_code=400, detail=f"Face too unclear ({probs_arr[best_idx]:.2f}). Ask student to look directly at camera.")
     
-    # Frontal check (slightly relaxed for enrollment since teacher is supervising)
+    # Frontal check
     lm = landmarks_arr[best_idx]
     left_eye, right_eye, nose = lm[0], lm[1], lm[2]
     dist_left = np.linalg.norm(nose - left_eye)
@@ -545,7 +546,7 @@ def assign_face(p: AssignPayload):
     if symmetry < 0.80:
         raise HTTPException(status_code=400, detail=f"Face not frontal enough ({symmetry:.2f}). Ask student to face camera.")
     
-    # Extract
+    # Extract embedding
     best_box = boxes_arr[best_idx:best_idx+1]
     extracted = mtcnn.extract(head_crop, best_box, save_path=None)
     
@@ -563,13 +564,28 @@ def assign_face(p: AssignPayload):
     with torch.no_grad():
         emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
     
+    # 🛡️ DUPLICATE FACE CHECK: Does this face already belong to someone?
+    DUPLICATE_THRESHOLD = 0.75  # If similarity > 0.75, it's likely the same person
+    
+    for existing_id, existing_data in global_face_db.items():
+        for saved_emb in existing_data["embeddings"]:
+            sim = cosine_similarity(emb.tolist(), saved_emb)
+            if sim > DUPLICATE_THRESHOLD:
+                return {
+                    "status": "error",
+                    "message": f"🚫 DUPLICATE FACE: This face already belongs to {existing_data['name']} (ID: {existing_id}).",
+                    "existing_student_id": existing_id,
+                    "existing_name": existing_data["name"],
+                    "similarity": round(sim, 3)
+                }
+    
     # Initialize if new student
     if p.student_id not in global_face_db:
         global_face_db[p.student_id] = {"name": p.student_name, "embeddings": []}
     
     existing = global_face_db[p.student_id]["embeddings"]
     
-    # 🎯 ENROLLMENT REDUNDANCY: Don't save near-duplicates
+    # 🎯 ENROLLMENT REDUNDANCY: Don't save near-duplicates for same student
     if len(existing) > 0:
         sims = [cosine_similarity(emb.tolist(), e) for e in existing]
         if max(sims) > 0.90:
