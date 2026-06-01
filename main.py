@@ -28,6 +28,7 @@ print(f"✅ RUNNING ON {device}")
 
 print("🔹 Loading YOLOv8n (PERSON TRACKING)...")
 yolo_person = YOLO("yolov8n_openvino_model/", task="detect") 
+print(f"🔥 YOLO device: {yolo_person.device if hasattr(yolo_person, 'device') else 'unknown'}")
 
 print("🔹 Loading Face Quality Gate (MTCNN)...")
 mtcnn = MTCNN(keep_all=False, device=device)
@@ -541,7 +542,7 @@ def assign_face(p: AssignPayload):
     best_idx = int(np.argmax(probs_arr))
     
     # 🚨 STRICT ENROLLMENT GATE
-    if probs_arr[best_idx] < 0.99:
+    if probs_arr[best_idx] < 0.95:
         raise HTTPException(status_code=400, detail=f"Face too unclear ({probs_arr[best_idx]:.2f}). Ask student to look directly at camera.")
     
     # Frontal check
@@ -568,11 +569,23 @@ def assign_face(p: AssignPayload):
     if len(face_tensors) == 0:
         raise HTTPException(status_code=400, detail="Face extraction failed.")
     
-    face_tensor = face_tensors[0]
+        face_tensor = face_tensors[0]
     with torch.no_grad():
         emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
     
-    # 🛡️ DUPLICATE FACE CHECK: Does this face already belong to someone?
+    # 🛡️ IDENTITY CONSISTENCY: If student already enrolled, verify face matches them
+    if p.student_id in global_face_db and len(global_face_db[p.student_id]["embeddings"]) > 0:
+        existing_embs = global_face_db[p.student_id]["embeddings"]
+        sims_to_self = [cosine_similarity(emb.tolist(), e) for e in existing_embs]
+        max_self_sim = max(sims_to_self)
+        if max_self_sim < 0.55:
+            return {
+                "status": "error",
+                "message": f"🚫 IDENTITY MISMATCH: This face does not match existing biometric record for {global_face_db[p.student_id]['name']}. You may have selected the wrong student.",
+                "max_similarity_to_record": round(max_self_sim, 3)
+            }
+    
+    # 🛡️ DUPLICATE FACE CHECK: Does this face already belong to someone else?
     DUPLICATE_THRESHOLD = 0.75
     
     for existing_id, existing_data in global_face_db.items():
