@@ -590,14 +590,19 @@ function App() {
         throw new Error(text || `Server error: ${response.status}`);
       }
       
-if (!response.ok) {
-  const errMsg = typeof result.detail === 'string' 
-    ? result.detail 
-    : (Array.isArray(result.detail) 
-        ? result.detail.map(d => d.msg || JSON.stringify(d)).join('; ') 
-        : JSON.stringify(result.detail || result));
-  throw new Error(errMsg || result.message || 'Assignment failed');
-}
+      if (!response.ok) {
+        let errMsg;
+        if (response.status === 422) {
+          // Pydantic validation error
+          const errData = await response.json();
+          errMsg = errData.detail?.map(d => `${d.loc?.join('.')}: ${d.msg}`).join('; ') 
+                   || JSON.stringify(errData.detail);
+        } else {
+          const result = await response.json().catch(() => ({}));
+          errMsg = result.detail || result.message || `Server error: ${response.status}`;
+        }
+        throw new Error(errMsg);
+      }
       
       if (result.status === "error") {
         alert(`❌ ${result.message}`);

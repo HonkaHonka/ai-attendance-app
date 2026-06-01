@@ -17,6 +17,8 @@ from facenet_pytorch import MTCNN, InceptionResnetV1
 from typing import Dict
 import time
 import shutil
+from typing import Optional
+
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -489,9 +491,10 @@ class AssignPayload(BaseModel):
     student_id: str
     student_name: str
     image: str
-    box: list = None
+    box: list | None = None   # ← CHANGED: explicitly allows null
     is_manual: bool = False
-
+    box: Optional[list] = None
+    
 @app.post("/api/assign-face")
 def assign_face(p: AssignPayload):
     if "," in p.image: p.image = p.image.split(",")[1]
