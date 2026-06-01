@@ -227,7 +227,7 @@ function App() {
   // ==========================================
   // INSPECT CANVAS RENDERER (right-click zoom)
   // ==========================================
-  useEffect(() => {
+    useEffect(() => {
     let animId;
     
     const drawInspect = () => {
@@ -249,9 +249,16 @@ function App() {
       let centerY = AI_H / 2;
       
       if (liveFace) {
-        const [bx, by, bw, bh] = liveFace.box;
-        centerX = bx + bw / 2;
-        centerY = by + bh * 0.25;
+        // Use face_box center if available, else body box center
+        if (liveFace.face_box) {
+          const [fx, fy, fw, fh] = liveFace.face_box;
+          centerX = fx + fw / 2;
+          centerY = fy + fh / 2;
+        } else {
+          const [bx, by, bw, bh] = liveFace.box;
+          centerX = bx + bw / 2;
+          centerY = by + bh * 0.25; // upper body guess
+        }
       }
       
       const outputW = 640;
@@ -268,8 +275,21 @@ function App() {
       canvas.height = outputH;
       ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outputW, outputH);
       
+      // Draw FACE-level rectangle, not body box
       if (liveFace) {
-        const [fx, fy, fw, fh] = liveFace.box;
+        let fx, fy, fw, fh;
+        
+        if (liveFace.face_box) {
+          [fx, fy, fw, fh] = liveFace.face_box;
+        } else {
+          // Estimate face in upper body if backend didn't send face_box
+          const [bx, by, bw, bh] = liveFace.box;
+          fx = bx + bw * 0.2;
+          fy = by;
+          fw = bw * 0.6;
+          fh = bh * 0.45;
+        }
+        
         const sx = ((fx * (vidW / AI_W)) - srcX) * (outputW / srcW);
         const sy = ((fy * (vidH / AI_H)) - srcY) * (outputH / srcH);
         const sw = fw * (vidW / AI_W) * (outputW / srcW);
@@ -431,7 +451,7 @@ function App() {
     });
   };
 
-  const handleCanvasWheel = (e) => {
+    const handleCanvasWheel = (e) => {
     e.preventDefault();
     
     const canvas = canvasRef.current;
@@ -451,15 +471,18 @@ function App() {
     }
     
     if (e.deltaY < 0) {
+      // WHEEL UP = ZOOM IN
       if (targetFace) {
         const boxArea = targetFace.box[2] * targetFace.box[3];
         const canvasArea = AI_W * AI_H;
         const ratio = boxArea / canvasArea;
         
         let zoomScale;
-        if (ratio < 0.015) zoomScale = 3.0;
-        else if (ratio < 0.04) zoomScale = 2.0;
-        else zoomScale = 1.3;
+        if (ratio < 0.003) zoomScale = 5.0;       // Extreme back row
+        else if (ratio < 0.008) zoomScale = 4.0;    // Very far
+        else if (ratio < 0.02) zoomScale = 3.0;     // Back row
+        else if (ratio < 0.05) zoomScale = 2.0;     // Middle
+        else zoomScale = 1.3;                        // Front row
         
         setWheelZoom({
           centerX: mouseX,
@@ -470,15 +493,17 @@ function App() {
         });
         setInspectMode(null);
       } else {
+        // Empty area zoom (YOLO missed them) — default high zoom
         setWheelZoom({
           centerX: mouseX,
           centerY: mouseY,
-          scale: 2.5,
+          scale: 3.5,  // Higher default for back-row discovery
           trackId: null,
           faceBox: null
         });
       }
     } else {
+      // WHEEL DOWN = ZOOM OUT
       setWheelZoom(null);
     }
   };
@@ -496,7 +521,18 @@ function App() {
     setLiveZoom({ origBox: null, isManual: true });
     setWheelZoom(null);
   };
-
+    const captureWheelZoomTracked = () => {
+    const zoomCanvas = document.getElementById('wheel-zoom-canvas');
+    if (!zoomCanvas) return;
+    
+    // The zoom canvas is already centered on the tracked face
+    const imageSrc = zoomCanvas.toDataURL('image/jpeg', 0.9);
+    
+    // Treat as manual because the canvas IS the crop
+    setQuickEnrollData({ image: imageSrc, box: null, isManual: true });
+    setLiveZoom({ origBox: null, isManual: true });
+    setWheelZoom(null);
+  };
   const assignFromInspect = () => {
     if (!inspectMode) return;
     
@@ -738,7 +774,7 @@ function App() {
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   fontSize: '14px', fontWeight: 'bold'
                 }}>
-                  <span>🔍 Inspect | Wheel: zoom | {inspectMode.scale.toFixed(1)}x</span>
+                  <span>🔍 Inspect | {inspectMode.scale.toFixed(1)}x</span>
                   <div style={{ display: 'flex', gap: '10px' }}>
                     <button 
                       onClick={assignFromInspect}
@@ -794,7 +830,14 @@ function App() {
                     {wheelZoom.trackId ? `🔍 Tracking: ${wheelZoom.scale.toFixed(1)}x` : '🎯 Manual Zoom Area'}
                   </span>
                   <div style={{ display: 'flex', gap: '10px' }}>
-                    {!wheelZoom.trackId && (
+                    {wheelZoom.trackId ? (
+                      <button onClick={captureWheelZoomTracked} style={{
+                        background: '#28a745', color: 'white', border: 'none',
+                        padding: '8px 18px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold'
+                      }}>
+                        ✅ Assign Name
+                      </button>
+                    ) : (
                       <button onClick={captureManualZoom} style={{
                         background: '#28a745', color: 'white', border: 'none',
                         padding: '8px 18px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold'

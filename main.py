@@ -551,7 +551,7 @@ def assign_face(p: AssignPayload):
     dist_right = np.linalg.norm(nose - right_eye)
     symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
     
-    if symmetry < 0.80:
+    if symmetry < 0.70:
         raise HTTPException(status_code=400, detail=f"Face not frontal enough ({symmetry:.2f}). Ask student to face camera.")
     
     # Extract embedding
@@ -619,7 +619,7 @@ def assign_face(p: AssignPayload):
     
     return {
         "status": "success",
-        "message": f"✅ {p.student_name} enrolled with high-quality frontal embedding.",
+        "message": f"✅ {p.student_name}    .",
         "quality": "excellent",
         "symmetry": round(symmetry, 3),
         "confidence": round(float(probs_arr[best_idx]), 3),
