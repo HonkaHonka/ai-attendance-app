@@ -503,7 +503,6 @@ def assign_face(p: AssignPayload):
     
     # 🎯 MANUAL ZOOM: image is already a magnified face crop
     if p.is_manual or not p.box:
-        # Resize if the frontend sent a huge canvas
         if max(img.size) > 1200:
             img.thumbnail((800, 800))
         head_crop = img
@@ -521,9 +520,8 @@ def assign_face(p: AssignPayload):
         
         head_crop = img.crop((hx1, hy1, hx2, hy2))
     
-    # --- everything below this point stays exactly the same ---
+    # --- MTCNN detection ---
     f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
-    
     
     if f_boxes is None or len(f_boxes) == 0 or f_boxes[0] is None:
         raise HTTPException(status_code=400, detail="No face detected. Ask student to look at camera.")
@@ -541,7 +539,7 @@ def assign_face(p: AssignPayload):
     
     best_idx = int(np.argmax(probs_arr))
     
-    # 🚨 STRICT ENROLLMENT GATE
+    # 🚨 QUALITY GATES
     if probs_arr[best_idx] < 0.95:
         raise HTTPException(status_code=400, detail=f"Face too unclear ({probs_arr[best_idx]:.2f}). Ask student to look directly at camera.")
     
@@ -569,7 +567,8 @@ def assign_face(p: AssignPayload):
     if len(face_tensors) == 0:
         raise HTTPException(status_code=400, detail="Face extraction failed.")
     
-        face_tensor = face_tensors[0]
+    # 🎯 THIS LINE MUST EXIST AND MUST COME BEFORE emb IS COMPUTED
+    face_tensor = face_tensors[0]
     with torch.no_grad():
         emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
     
@@ -589,7 +588,6 @@ def assign_face(p: AssignPayload):
     DUPLICATE_THRESHOLD = 0.75
     
     for existing_id, existing_data in global_face_db.items():
-        # Skip self — same student can get more angles
         if existing_id == p.student_id:
             continue
             
@@ -632,7 +630,7 @@ def assign_face(p: AssignPayload):
     
     return {
         "status": "success",
-        "message": f"✅ {p.student_name}    .",
+        "message": f"✅ {p.student_name} enrolled successfully.",
         "quality": "excellent",
         "symmetry": round(symmetry, 3),
         "confidence": round(float(probs_arr[best_idx]), 3),
