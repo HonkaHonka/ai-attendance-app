@@ -477,12 +477,18 @@ function App() {
         const canvasArea = AI_W * AI_H;
         const ratio = boxArea / canvasArea;
         
+                // 🎯 ADAPTIVE: If camera already focused on this person, don't zoom much
+        const isCameraFocused = cameraFocus.mode === 'focused' && 
+                                cameraFocus.target?.track_id === targetFace.track_id;
+        
         let zoomScale;
-        if (ratio < 0.003) zoomScale = 5.0;       // Extreme back row
-        else if (ratio < 0.008) zoomScale = 4.0;    // Very far
-        else if (ratio < 0.02) zoomScale = 3.0;     // Back row
-        else if (ratio < 0.05) zoomScale = 2.0;     // Middle
-        else zoomScale = 1.3;                        // Front row
+        if (isCameraFocused) {
+          zoomScale = 1.1; // Already large - just a tiny nudge for inspection
+        } else if (ratio < 0.003) zoomScale = 5.0;
+        else if (ratio < 0.008) zoomScale = 4.0;
+        else if (ratio < 0.02) zoomScale = 3.0;
+        else if (ratio < 0.05) zoomScale = 2.0;
+        else zoomScale = 1.3;
         
         setWheelZoom({
           centerX: mouseX,
@@ -622,7 +628,37 @@ function App() {
       alert(`❌ Quick Enroll Error: ${error.message}`); 
     }
   };
-
+    // ==========================================
+  // CAMERA FOCUS STATE (Adapts to smart tracking)
+  // ==========================================
+  const cameraFocus = React.useMemo(() => {
+    if (!detectedFaces || detectedFaces.length === 0) {
+      return { mode: 'empty', target: null, coverage: 0 };
+    }
+    
+    const frameArea = AI_W * AI_H;
+    const totalBoxArea = detectedFaces.reduce((sum, f) => sum + f.box[2] * f.box[3], 0);
+    const coverage = totalBoxArea / frameArea;
+    
+    const sorted = [...detectedFaces].sort((a, b) => (b.box[2]*b.box[3]) - (a.box[2]*a.box[3]));
+    const largest = sorted[0];
+    const largestRatio = (largest.box[2] * largest.box[3]) / frameArea;
+    
+    if (detectedFaces.length === 1 && largestRatio > 0.20) {
+      return { mode: 'focused', target: largest, coverage };
+    }
+    if (detectedFaces.length === 2 && coverage > 0.45 && largestRatio > 0.18) {
+      return { mode: 'focused', target: largest, coverage };
+    }
+    if (coverage < 0.15 && detectedFaces.length >= 3) {
+      return { mode: 'wide', target: null, coverage };
+    }
+    if (detectedFaces.length >= 2 && coverage > 0.60) {
+      return { mode: 'crowded', target: null, coverage };
+    }
+    
+    return { mode: 'normal', target: null, coverage };
+  }, [detectedFaces]);
   // ==========================================
   // RENDER
   // ==========================================
@@ -748,7 +784,44 @@ function App() {
               Close Tracker
             </button>
           </div>
-
+                    {/* 🎯 CAMERA FOCUS INDICATOR */}
+          <div style={{ 
+            position: 'absolute', 
+            top: '70px', 
+            left: '50%', 
+            transform: 'translateX(-50%)', 
+            zIndex: 3010,
+            background: cameraFocus.mode === 'focused' ? 'rgba(40, 167, 69, 0.9)' : 
+                         cameraFocus.mode === 'wide' ? 'rgba(47, 50, 84, 0.9)' : 
+                         cameraFocus.mode === 'crowded' ? 'rgba(255, 193, 7, 0.9)' : 'rgba(108, 117, 125, 0.9)',
+            color: 'white',
+            padding: '10px 24px',
+            borderRadius: '20px',
+            fontSize: '15px',
+            fontWeight: 'bold',
+            pointerEvents: 'none',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            transition: 'all 0.3s ease'
+          }}>
+            {cameraFocus.mode === 'focused' && cameraFocus.target?.status === 'unknown' && (
+              <span>🎯 CAMERA FOCUSED — Click the large red box to assign</span>
+            )}
+            {cameraFocus.mode === 'focused' && cameraFocus.target?.status === 'known' && (
+              <span>✅ FOCUSED ON {cameraFocus.target.name} — Already marked present</span>
+            )}
+            {cameraFocus.mode === 'wide' && (
+              <span>📷 WIDE VIEW — Call names; camera will auto-focus on responders</span>
+            )}
+            {cameraFocus.mode === 'crowded' && (
+              <span>⚠️ MULTIPLE MOVEMENTS — Wait for camera to settle on one person</span>
+            )}
+            {cameraFocus.mode === 'normal' && (
+              <span>🔍 SCANNING — Use left-click or wheel zoom to inspect</span>
+            )}
+            {cameraFocus.mode === 'empty' && (
+              <span>📷 NO BODIES DETECTED — Check camera position</span>
+            )}
+          </div>
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
             
             <div style={{ position: 'relative', width: '100%', maxHeight: '100%', aspectRatio: '16/9', display: 'flex', justifyContent: 'center' }}>
