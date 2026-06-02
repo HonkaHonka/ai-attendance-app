@@ -45,7 +45,7 @@ function App() {
   const [liveZoom, setLiveZoom] = useState(null); 
   const [inspectMode, setInspectMode] = useState(null);
   const [wheelZoom, setWheelZoom] = useState(null);
-
+  const [isRosterVisible, setIsRosterVisible] = useState(true);
   // REFS
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
@@ -843,77 +843,105 @@ function App() {
                 style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 10, cursor: 'crosshair' }} 
               />
             </div>
-                        {/* 📋 LEFT PANEL — Persistent Student Roster */}
-            <div style={{
-              position: 'absolute',
-              left: 0,
-              top: 0,
-              width: '360px',
-              height: '100%',
-              background: 'rgba(15, 15, 25, 0.95)',
-              zIndex: 3400,
-              padding: '20px',
-              borderRight: '3px solid #ffcb05',
-              display: 'flex',
-              flexDirection: 'column',
-              overflow: 'hidden'
-            }}>
-              <h3 style={{ color: '#ffcb05', margin: '0 0 10px 0', fontSize: '18px', fontWeight: 'bold' }}>
-                📋 Class Roster
-              </h3>
-              <div style={{ color: '#aaa', fontSize: '13px', marginBottom: '15px', borderBottom: '1px solid #444', paddingBottom: '10px' }}>
-                <div style={{ color: 'white', fontWeight: 'bold', fontSize: '14px', marginBottom: '4px' }}>
-                  {selectedClass} — {students.length} Students
+                                    {/* 📋 ROSTER TOGGLE BUTTON */}
+            <button
+              onClick={() => setIsRosterVisible(!isRosterVisible)}
+              style={{
+                position: 'absolute',
+                left: isRosterVisible ? '360px' : '0',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                zIndex: 3600,
+                background: '#ffcb05',
+                color: '#1a1a2e',
+                border: 'none',
+                padding: '14px 10px',
+                borderRadius: '0 8px 8px 0',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                fontSize: '18px',
+                boxShadow: '2px 0 10px rgba(0,0,0,0.4)',
+                transition: 'left 0.3s ease',
+                writingMode: 'vertical-rl',
+                textOrientation: 'mixed'
+              }}
+            >
+              {isRosterVisible ? '← Hide' : '📋 Show'}
+            </button>
+
+            {/* 📋 LEFT PANEL — Collapsible Student Roster */}
+            {isRosterVisible && (
+              <div style={{
+                position: 'absolute',
+                left: 0,
+                top: 0,
+                width: '360px',
+                height: '100%',
+                background: 'rgba(15, 15, 25, 0.95)',
+                zIndex: 3400,
+                padding: '20px',
+                borderRight: '3px solid #ffcb05',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden'
+              }}>
+                <h3 style={{ color: '#ffcb05', margin: '0 0 10px 0', fontSize: '18px', fontWeight: 'bold' }}>
+                  📋 Class Roster
+                </h3>
+                <div style={{ color: '#aaa', fontSize: '13px', marginBottom: '15px', borderBottom: '1px solid #444', paddingBottom: '10px' }}>
+                  <div style={{ color: 'white', fontWeight: 'bold', fontSize: '14px', marginBottom: '4px' }}>
+                    {selectedClass} — {students.length} Students
+                  </div>
+                  <div>Call names from the list. Click a face to assign.</div>
                 </div>
-                <div>Call names from the list. Click a face to assign.</div>
-              </div>
-              
-              <div style={{ flex: 1, overflowY: 'auto', paddingRight: '6px' }}>
-                {students.map((student, idx) => {
-                  const status = attendanceRecords[student['Student ID']];
-                  const isPresent = status === 'present';
-                  const isFailed = status === 'failed';
-                  return (
-                    <div key={idx} style={{
-                      padding: '10px 12px',
-                      marginBottom: '8px',
-                      borderRadius: '6px',
-                      background: isPresent ? 'rgba(40, 167, 69, 0.15)' : isFailed ? 'rgba(220, 53, 69, 0.15)' : 'rgba(255,255,255,0.04)',
-                      border: `1px solid ${isPresent ? '#28a745' : isFailed ? '#dc3545' : '#444'}`,
-                      transition: 'all 0.2s'
-                    }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                        <span style={{ color: 'white', fontWeight: 'bold', fontSize: '14px' }}>
-                          {student['Student Name']}
-                        </span>
-                        <span style={{
-                          padding: '3px 8px',
-                          borderRadius: '4px',
-                          fontSize: '11px',
-                          fontWeight: 'bold',
-                          background: isPresent ? '#28a745' : isFailed ? '#dc3545' : '#666',
-                          color: 'white'
-                        }}>
-                          {isPresent ? '✅' : isFailed ? '❌' : '⏳'}
-                        </span>
+                
+                <div style={{ flex: 1, overflowY: 'auto', paddingRight: '6px' }}>
+                  {students.map((student, idx) => {
+                    const status = attendanceRecords[student['Student ID']];
+                    const isPresent = status === 'present';
+                    const isFailed = status === 'failed';
+                    return (
+                      <div key={idx} style={{
+                        padding: '10px 12px',
+                        marginBottom: '8px',
+                        borderRadius: '6px',
+                        background: isPresent ? 'rgba(40, 167, 69, 0.15)' : isFailed ? 'rgba(220, 53, 69, 0.15)' : 'rgba(255,255,255,0.04)',
+                        border: `1px solid ${isPresent ? '#28a745' : isFailed ? '#dc3545' : '#444'}`,
+                        transition: 'all 0.2s'
+                      }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                          <span style={{ color: 'white', fontWeight: 'bold', fontSize: '14px' }}>
+                            {student['Student Name']}
+                          </span>
+                          <span style={{
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            fontWeight: 'bold',
+                            background: isPresent ? '#28a745' : isFailed ? '#dc3545' : '#666',
+                            color: 'white'
+                          }}>
+                            {isPresent ? '✅' : isFailed ? '❌' : '⏳'}
+                          </span>
+                        </div>
+                        <div style={{ color: '#888', fontSize: '12px' }}>
+                          ID: {student['Student ID']}
+                        </div>
                       </div>
-                      <div style={{ color: '#888', fontSize: '12px' }}>
-                        ID: {student['Student ID']}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              
-              <div style={{ marginTop: '15px', paddingTop: '12px', borderTop: '2px solid #ffcb05' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'white', fontSize: '14px', fontWeight: 'bold' }}>
-                  <span>Marked Present:</span>
-                  <span style={{ color: '#28a745' }}>
-                    {students.filter(s => attendanceRecords[s['Student ID']] === 'present').length} / {students.length}
-                  </span>
+                    );
+                  })}
+                </div>
+                
+                <div style={{ marginTop: '15px', paddingTop: '12px', borderTop: '2px solid #ffcb05' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: 'white', fontSize: '14px', fontWeight: 'bold' }}>
+                    <span>Marked Present:</span>
+                    <span style={{ color: '#28a745' }}>
+                      {students.filter(s => attendanceRecords[s['Student ID']] === 'present').length} / {students.length}
+                    </span>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
             {/* 🔍 INSPECT OVERLAY */}
             {inspectMode && (
               <div style={{
