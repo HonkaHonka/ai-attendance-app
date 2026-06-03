@@ -401,17 +401,8 @@ def process_frame(image_b64):
             x1, y1, x2, y2 = map(int, box)
             track_id = int(track_id)
             
-            box_w = x2 - x1
-            box_h = y2 - y1
-            
-            # Minimum size
-            if box_w < 50 or box_h < 80:
-                continue
-            
-            # Aspect ratio: person boxes should be taller than wide
-            aspect = box_h / box_w
-            if aspect < 1.0 or aspect > 4.0:
-                continue  # Too square or too skinny = not a person
+            if (x2 - x1) < 40 or (y2 - y1) < 40:
+             continue
 
             person = live_tracker_memory.get(track_id, {
                 "student_id": None,
