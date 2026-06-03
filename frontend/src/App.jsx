@@ -933,11 +933,15 @@ function App() {
                 </div>
                 
                 <div style={{ marginTop: '15px', paddingTop: '12px', borderTop: '2px solid #ffcb05' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', color: 'white', fontSize: '14px', fontWeight: 'bold' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: 'white', fontSize: '14px', fontWeight: 'bold', marginBottom: '6px' }}>
                     <span>Marked Present:</span>
                     <span style={{ color: '#28a745' }}>
                       {students.filter(s => attendanceRecords[s['Student ID']] === 'present').length} / {students.length}
                     </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: '#aaa', fontSize: '12px' }}>
+                    <span>DB Students:</span>
+                    <span>{Object.keys(detectedFaces.reduce((acc,f) => { if(f.status==='known' && f.student_id) acc[f.student_id]=true; return acc; }, {})).length} enrolled</span>
                   </div>
                 </div>
               </div>

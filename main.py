@@ -48,6 +48,11 @@ def load_best_db():
     with open(BEST_MEMORY_FILE, "rb") as f: return pickle.load(f)
 
 def save_best_db(db):
+    for sid, data in db.items():
+        if len(data["embeddings"]) > 8:
+            data["embeddings"] = data["embeddings"][:8]
+            data["quality"] = data["quality"][:8]
+    
     with open(BEST_MEMORY_FILE, "wb") as f:
         pickle.dump(db, f)
     print(f"🏆 BEST DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
@@ -88,6 +93,11 @@ def load_face_db():
     with open(MEMORY_FILE, "rb") as f: return pickle.load(f)
 
 def save_face_db(db):
+    # 🛡️ DEFENSIVE CAP: truncate any race-condition overflow
+    for sid, data in db.items():
+        if len(data["embeddings"]) > 8:
+            data["embeddings"] = data["embeddings"][:8]
+    
     if os.path.exists(MEMORY_FILE):
         shutil.copy2(MEMORY_FILE, MEMORY_FILE + ".backup")
     with open(MEMORY_FILE, "wb") as f:
@@ -585,6 +595,15 @@ def assign_face(p: AssignPayload):
     landmarks_arr = np.array(landmarks_raw)
     if landmarks_arr.ndim == 2: landmarks_arr = landmarks_arr.reshape(1, 5, 2)
     
+        # 🛡️ MANUAL ZOOM: Reject if multiple faces in crop
+    if p.is_manual and len(boxes_arr) > 1:
+        high_conf_count = sum(1 for prob in probs_arr if prob > 0.90)
+        if high_conf_count > 1:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Multiple faces detected in zoom ({high_conf_count} found). Please zoom closer on one student only."
+            )
+    
     best_idx = int(np.argmax(probs_arr))
     
     # 🚨 QUALITY GATES
@@ -656,6 +675,17 @@ def assign_face(p: AssignPayload):
     
     existing = global_face_db[p.student_id]["embeddings"]
     
+        # 🎯 HARD CAP: Never exceed 8 embeddings per student
+    if len(existing) >= 8:
+        return {
+            "status": "success",
+            "message": f"{p.student_name} already has maximum biometric data (8 angles). No new data saved.",
+            "quality": "maxed",
+            "symmetry": round(symmetry, 3),
+            "confidence": round(float(probs_arr[best_idx]), 3),
+            "total_embeddings": len(existing)
+        }
+
     # 🎯 ENROLLMENT REDUNDANCY: Don't save near-duplicates for same student
     if len(existing) > 0:
         sims = [cosine_similarity(emb.tolist(), e) for e in existing]
