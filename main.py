@@ -287,6 +287,7 @@ class EnrollPayload(BaseModel):
     class_nbr: str
     images: dict  
 
+
 @app.post("/api/enroll-face")
 def enroll_face(payload: EnrollPayload):
     student_embeddings =[]
@@ -802,6 +803,27 @@ def assign_face(p: AssignPayload):
         "total_embeddings": len(existing)
     }
 
+
+
+class UnassignPayload(BaseModel):
+    student_id: str
+
+@app.post("/api/unassign-student")
+def unassign_student(p: UnassignPayload):
+    if p.student_id in global_face_db:
+        del global_face_db[p.student_id]
+        save_face_db(global_face_db)
+        print(f"🗑️ Removed student {p.student_id} from face DB")
+    
+    # Clear tracker so the face immediately becomes unknown again
+    global live_tracker_memory
+    live_tracker_memory.clear()
+    
+    return {
+        "status": "success", 
+        "message": f"Student unassigned. Biometric data removed.",
+        "student_id": p.student_id
+    }
 # =========================================================
 # EXCEL EXPORT (RESTORED)
 # =========================================================

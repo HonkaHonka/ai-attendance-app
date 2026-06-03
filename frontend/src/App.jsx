@@ -48,6 +48,7 @@ function App() {
   const [isRosterVisible, setIsRosterVisible] = useState(true);
   const [isDashboardOpen, setIsDashboardOpen] = useState(false);
   const [dbHealth, setDbHealth] = useState(null);
+  const [isUpdateMode, setIsUpdateMode] = useState(false);
   // REFS
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
@@ -388,7 +389,7 @@ function App() {
   // ==========================================
   // MOUSE HANDLERS
   // ==========================================
-  const handleCanvasClick = (e) => {
+    const handleCanvasClick = (e) => {
     if (e.button !== 0) return;
 
     const canvas = canvasRef.current;
@@ -404,22 +405,29 @@ function App() {
     detectedFaces.forEach(face => {
       const [x, y, w, h] = face.box;
       
-      if ((face.status === 'unknown' || face.status === 'scanning') && 
-          clickX >= x && clickX <= x + w && 
-          clickY >= y && clickY <= y + h) {
+      if (clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
         
-        const video = surveillanceWebcamRef.current?.video;
-        if (!video || video.readyState < 2) return;
+        // 🔄 UPDATE MODE: Click on known student to unassign
+        if (isUpdateMode && face.status === 'known' && face.student_id) {
+          unassignStudent(face.student_id, face.name);
+          return;
+        }
         
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = AI_W;
-        tempCanvas.height = AI_H;
-        tempCanvas.getContext('2d').drawImage(video, 0, 0, AI_W, AI_H);
-        
-        const assignBox = face.box;
-        
-        setQuickEnrollData({ image: tempCanvas.toDataURL('image/jpeg', 0.8), box: assignBox, isManual: false });
-        setLiveZoom({ origBox: assignBox, isManual: false });
+        // Normal assign behavior for unknown/scanning
+        if ((face.status === 'unknown' || face.status === 'scanning')) {
+          const video = surveillanceWebcamRef.current?.video;
+          if (!video || video.readyState < 2) return;
+          
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = AI_W;
+          tempCanvas.height = AI_H;
+          tempCanvas.getContext('2d').drawImage(video, 0, 0, AI_W, AI_H);
+          
+          const assignBox = face.box;
+          
+          setQuickEnrollData({ image: tempCanvas.toDataURL('image/jpeg', 0.8), box: assignBox, isManual: false });
+          setLiveZoom({ origBox: assignBox, isManual: false });
+        }
       }
     });
   };
@@ -631,6 +639,33 @@ function App() {
     }
   };
 
+  const unassignStudent = async (studentId, studentName) => {
+    if (!window.confirm(`Unassign ${studentName}?\n\nThis will remove their biometric data and mark them absent. Other students stay untouched.`)) {
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/unassign-student`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ student_id: String(studentId) })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || 'Unassign failed');
+      
+      // Remove from local attendance records
+      setAttendanceRecords(prev => {
+        const next = { ...prev };
+        delete next[studentId];
+        return next;
+      });
+      
+      alert(`✅ ${result.message}`);
+      setIsUpdateMode(false);
+    } catch (error) {
+      alert(`❌ Error: ${error.message}`);
+    }
+  };
+  
   const fetchDbHealth = async () => {
     try {
       const res = await fetch(`${API_BASE}/db-health`);
@@ -792,21 +827,35 @@ function App() {
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column' }}>
           
            <div style={{ 
-                padding: '12px 20px', 
-                background: '#111', 
-                color: 'white', 
-                display: 'flex', 
-                justifyContent: 'space-between', 
-                alignItems: 'center', 
-                zIndex: 3010,
-                minHeight: '50px',
-                flexWrap: 'wrap',
-                gap: '10px'
-              }}>
+            padding: '12px 20px', 
+            background: '#111', 
+            color: 'white', 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center', 
+            zIndex: 3010,
+            minHeight: '50px',
+            flexWrap: 'wrap',
+            gap: '10px'
+          }}>
             <h2 style={{ margin: 0, color: '#ffcb05', fontSize: 'clamp(16px, 2vw, 22px)', whiteSpace: 'nowrap' }}>
               🔴 Live Classroom Tracking
             </h2>
             <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexShrink: 0 }}>
+              <button onClick={() => setIsUpdateMode(!isUpdateMode)} style={{ 
+                background: isUpdateMode ? '#ffcb05' : '#2f3254', 
+                color: isUpdateMode ? '#1a1a2e' : '#ffcb05', 
+                border: '2px solid #ffcb05', 
+                padding: '8px 16px', 
+                borderRadius: '5px', 
+                fontWeight: 'bold', 
+                cursor: 'pointer',
+                fontSize: 'clamp(12px, 1.2vw, 14px)',
+                whiteSpace: 'nowrap',
+                flexShrink: 0
+              }}>
+                {isUpdateMode ? '✅ Done Updating' : '🔄 Update'}
+              </button>
               <button onClick={fetchDbHealth} style={{ 
                 background: '#2f3254', 
                 color: '#ffcb05', 
@@ -875,63 +924,86 @@ function App() {
               <span>📷 NO BODIES DETECTED — Check camera position</span>
             )}
           </div>
-          {/* 📊 DB HEALTH DASHBOARD MODAL */}
+
+          {/* 🔄 UPDATE MODE INDICATOR */}
+          {isUpdateMode && (
+            <div style={{ 
+              position: 'absolute', 
+              top: '115px', 
+              left: '50%', 
+              transform: 'translateX(-50%)', 
+              zIndex: 3010,
+              background: 'rgba(255, 193, 7, 0.95)',
+              color: '#1a1a2e',
+              padding: '8px 20px',
+              borderRadius: '20px',
+              fontSize: '14px',
+              fontWeight: 'bold',
+              pointerEvents: 'none',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
+            }}>
+              🔄 UPDATE MODE ACTIVE — Click any green box to unassign that student
+            </div>
+          )}
+
+                    {/* 📊 DB HEALTH DASHBOARD — RIGHT SIDE PANEL */}
           {isDashboardOpen && dbHealth && (
             <div style={{
-              position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-              width: '700px', maxHeight: '80vh', background: 'rgba(15, 15, 25, 0.98)',
-              border: '3px solid #ffcb05', borderRadius: '16px', zIndex: 5000,
-              padding: '30px', overflowY: 'auto', boxShadow: '0 30px 80px rgba(0,0,0,0.9)'
+              position: 'absolute',
+              top: '70px',
+              right: '10px',
+              width: 'clamp(320px, 28vw, 420px)',
+              height: 'calc(100% - 80px)',
+              background: 'rgba(15, 15, 25, 0.98)',
+              border: '3px solid #ffcb05',
+              borderRadius: '12px',
+              zIndex: 4500,
+              padding: '20px',
+              overflowY: 'auto',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.9)',
+              display: 'flex',
+              flexDirection: 'column'
             }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #ffcb05', paddingBottom: '15px' }}>
-                <h2 style={{ margin: 0, color: '#ffcb05' }}>📊 Biometric Database Health</h2>
-                <button onClick={() => setIsDashboardOpen(false)} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', borderBottom: '2px solid #ffcb05', paddingBottom: '12px' }}>
+                <h3 style={{ margin: 0, color: '#ffcb05', fontSize: '16px' }}>📊 DB Health</h3>
+                <button onClick={() => setIsDashboardOpen(false)} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', fontSize: '12px' }}>
                   Close
                 </button>
               </div>
               
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', marginBottom: '25px' }}>
-                <div style={{ background: '#2a2a3c', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
-                  <div style={{ fontSize: '28px', fontWeight: 'bold', color: 'white' }}>{dbHealth.total_students}</div>
-                  <div style={{ color: '#aaa', fontSize: '13px' }}>Total Students</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '15px' }}>
+                <div style={{ background: '#2a2a3c', padding: '10px', borderRadius: '6px', textAlign: 'center' }}>
+                  <div style={{ fontSize: '22px', fontWeight: 'bold', color: 'white' }}>{dbHealth.total_students}</div>
+                  <div style={{ color: '#aaa', fontSize: '11px' }}>Students</div>
                 </div>
-                <div style={{ background: '#2a2a3c', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
-                  <div style={{ fontSize: '28px', fontWeight: 'bold', color: dbHealth.suspicious_count > 0 ? '#dc3545' : '#28a745' }}>{dbHealth.suspicious_count}</div>
-                  <div style={{ color: '#aaa', fontSize: '13px' }}>Suspicious Records</div>
-                </div>
-                <div style={{ background: '#2a2a3c', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
-                  <div style={{ fontSize: '28px', fontWeight: 'bold', color: '#ffcb05' }}>
-                    {dbHealth.students.reduce((sum, s) => sum + s.embedding_count, 0)}
-                  </div>
-                  <div style={{ color: '#aaa', fontSize: '13px' }}>Total Embeddings</div>
+                <div style={{ background: '#2a2a3c', padding: '10px', borderRadius: '6px', textAlign: 'center' }}>
+                  <div style={{ fontSize: '22px', fontWeight: 'bold', color: dbHealth.suspicious_count > 0 ? '#dc3545' : '#28a745' }}>{dbHealth.suspicious_count}</div>
+                  <div style={{ color: '#aaa', fontSize: '11px' }}>Suspicious</div>
                 </div>
               </div>
               
-              <h3 style={{ color: 'white', marginTop: 0, marginBottom: '12px' }}>Per-Student Analysis</h3>
-              <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <div style={{ flex: 1, overflowY: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
                   <thead>
                     <tr style={{ background: '#2f3254', color: '#ffcb05' }}>
-                      <th style={{ padding: '10px', textAlign: 'left' }}>Student</th>
-                      <th style={{ padding: '10px', textAlign: 'center' }}>Embeddings</th>
-                      <th style={{ padding: '10px', textAlign: 'center' }}>Avg Sim</th>
-                      <th style={{ padding: '10px', textAlign: 'center' }}>Min Sim</th>
-                      <th style={{ padding: '10px', textAlign: 'center' }}>Status</th>
+                      <th style={{ padding: '8px', textAlign: 'left' }}>Name</th>
+                      <th style={{ padding: '8px', textAlign: 'center' }}>Emb</th>
+                      <th style={{ padding: '8px', textAlign: 'center' }}>Min</th>
+                      <th style={{ padding: '8px', textAlign: 'center' }}>Flag</th>
                     </tr>
                   </thead>
                   <tbody>
                     {dbHealth.students.map((s, idx) => (
                       <tr key={idx} style={{ borderBottom: '1px solid #444', background: s.flag !== 'OK' ? 'rgba(220, 53, 69, 0.1)' : 'transparent' }}>
-                        <td style={{ padding: '10px', color: 'white' }}>
+                        <td style={{ padding: '8px', color: 'white' }}>
                           <div style={{ fontWeight: 'bold' }}>{s.name}</div>
-                          <div style={{ color: '#888', fontSize: '11px' }}>ID: {s.student_id}</div>
+                          <div style={{ color: '#888', fontSize: '10px' }}>{s.student_id}</div>
                         </td>
-                        <td style={{ padding: '10px', textAlign: 'center', color: 'white', fontWeight: 'bold' }}>{s.embedding_count}</td>
-                        <td style={{ padding: '10px', textAlign: 'center', color: '#aaa' }}>{s.avg_self_similarity}</td>
-                        <td style={{ padding: '10px', textAlign: 'center', color: s.min_self_similarity < 0.75 ? '#dc3545' : '#28a745' }}>{s.min_self_similarity}</td>
-                        <td style={{ padding: '10px', textAlign: 'center' }}>
+                        <td style={{ padding: '8px', textAlign: 'center', color: 'white' }}>{s.embedding_count}</td>
+                        <td style={{ padding: '8px', textAlign: 'center', color: s.min_self_similarity < 0.75 ? '#dc3545' : '#28a745' }}>{s.min_self_similarity}</td>
+                        <td style={{ padding: '8px', textAlign: 'center' }}>
                           <span style={{
-                            padding: '4px 10px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold',
+                            padding: '2px 6px', borderRadius: '3px', fontSize: '10px', fontWeight: 'bold',
                             background: s.flag === 'OK' ? '#28a745' : s.flag === 'HIGH_VARIANCE' ? '#dc3545' : '#ffcb05',
                             color: 'white'
                           }}>
