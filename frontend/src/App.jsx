@@ -46,6 +46,8 @@ function App() {
   const [inspectMode, setInspectMode] = useState(null);
   const [wheelZoom, setWheelZoom] = useState(null);
   const [isRosterVisible, setIsRosterVisible] = useState(true);
+  const [isDashboardOpen, setIsDashboardOpen] = useState(false);
+  const [dbHealth, setDbHealth] = useState(null);
   // REFS
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
@@ -628,6 +630,17 @@ function App() {
       alert(`❌ Quick Enroll Error: ${error.message}`); 
     }
   };
+
+  const fetchDbHealth = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/db-health`);
+      if (!res.ok) throw new Error("Failed to fetch health");
+      setDbHealth(await res.json());
+      setIsDashboardOpen(true);
+    } catch (err) {
+      alert(`⚠️ Health check failed: ${err.message}`);
+    }
+  };
     // ==========================================
   // CAMERA FOCUS STATE (Adapts to smart tracking)
   // ==========================================
@@ -778,11 +791,16 @@ function App() {
       {isSurveillanceActive && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column' }}>
           
-          <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
+            <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
             <h2 style={{ margin: 0, color: '#ffcb05' }}>🔴 Live Classroom Tracking</h2>
-            <button onClick={stopSurveillance} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
-              Close Tracker
-            </button>
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              <button onClick={fetchDbHealth} style={{ background: '#2f3254', color: '#ffcb05', border: '2px solid #ffcb05', padding: '8px 20px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
+                📊 DB Health
+              </button>
+              <button onClick={stopSurveillance} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
+                Close Tracker
+              </button>
+            </div>
           </div>
                     {/* 🎯 CAMERA FOCUS INDICATOR */}
           <div style={{ 
@@ -822,6 +840,77 @@ function App() {
               <span>📷 NO BODIES DETECTED — Check camera position</span>
             )}
           </div>
+          {/* 📊 DB HEALTH DASHBOARD MODAL */}
+          {isDashboardOpen && dbHealth && (
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+              width: '700px', maxHeight: '80vh', background: 'rgba(15, 15, 25, 0.98)',
+              border: '3px solid #ffcb05', borderRadius: '16px', zIndex: 5000,
+              padding: '30px', overflowY: 'auto', boxShadow: '0 30px 80px rgba(0,0,0,0.9)'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #ffcb05', paddingBottom: '15px' }}>
+                <h2 style={{ margin: 0, color: '#ffcb05' }}>📊 Biometric Database Health</h2>
+                <button onClick={() => setIsDashboardOpen(false)} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
+                  Close
+                </button>
+              </div>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', marginBottom: '25px' }}>
+                <div style={{ background: '#2a2a3c', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
+                  <div style={{ fontSize: '28px', fontWeight: 'bold', color: 'white' }}>{dbHealth.total_students}</div>
+                  <div style={{ color: '#aaa', fontSize: '13px' }}>Total Students</div>
+                </div>
+                <div style={{ background: '#2a2a3c', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
+                  <div style={{ fontSize: '28px', fontWeight: 'bold', color: dbHealth.suspicious_count > 0 ? '#dc3545' : '#28a745' }}>{dbHealth.suspicious_count}</div>
+                  <div style={{ color: '#aaa', fontSize: '13px' }}>Suspicious Records</div>
+                </div>
+                <div style={{ background: '#2a2a3c', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
+                  <div style={{ fontSize: '28px', fontWeight: 'bold', color: '#ffcb05' }}>
+                    {dbHealth.students.reduce((sum, s) => sum + s.embedding_count, 0)}
+                  </div>
+                  <div style={{ color: '#aaa', fontSize: '13px' }}>Total Embeddings</div>
+                </div>
+              </div>
+              
+              <h3 style={{ color: 'white', marginTop: 0, marginBottom: '12px' }}>Per-Student Analysis</h3>
+              <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ background: '#2f3254', color: '#ffcb05' }}>
+                      <th style={{ padding: '10px', textAlign: 'left' }}>Student</th>
+                      <th style={{ padding: '10px', textAlign: 'center' }}>Embeddings</th>
+                      <th style={{ padding: '10px', textAlign: 'center' }}>Avg Sim</th>
+                      <th style={{ padding: '10px', textAlign: 'center' }}>Min Sim</th>
+                      <th style={{ padding: '10px', textAlign: 'center' }}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dbHealth.students.map((s, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid #444', background: s.flag !== 'OK' ? 'rgba(220, 53, 69, 0.1)' : 'transparent' }}>
+                        <td style={{ padding: '10px', color: 'white' }}>
+                          <div style={{ fontWeight: 'bold' }}>{s.name}</div>
+                          <div style={{ color: '#888', fontSize: '11px' }}>ID: {s.student_id}</div>
+                        </td>
+                        <td style={{ padding: '10px', textAlign: 'center', color: 'white', fontWeight: 'bold' }}>{s.embedding_count}</td>
+                        <td style={{ padding: '10px', textAlign: 'center', color: '#aaa' }}>{s.avg_self_similarity}</td>
+                        <td style={{ padding: '10px', textAlign: 'center', color: s.min_self_similarity < 0.75 ? '#dc3545' : '#28a745' }}>{s.min_self_similarity}</td>
+                        <td style={{ padding: '10px', textAlign: 'center' }}>
+                          <span style={{
+                            padding: '4px 10px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold',
+                            background: s.flag === 'OK' ? '#28a745' : s.flag === 'HIGH_VARIANCE' ? '#dc3545' : '#ffcb05',
+                            color: 'white'
+                          }}>
+                            {s.flag}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
             
             <div style={{ position: 'relative', width: '100%', maxHeight: '100%', aspectRatio: '16/9', display: 'flex', justifyContent: 'center' }}>

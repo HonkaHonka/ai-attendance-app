@@ -39,10 +39,13 @@ mtcnn = MTCNN(keep_all=False, device=device)
 print("🔹 Loading Face Embedding Model...")
 face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
-DATA_FILE = "data/KHC_REGISTERED_STUDENTS_31560.xlsx"
-MEMORY_FILE = "data/face_memory.pkl"
-BEST_MEMORY_FILE = "data/face_memory_best.pkl"
-os.makedirs("data", exist_ok=True)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DATA_FILE = os.path.join(DATA_DIR, "KHC_REGISTERED_STUDENTS_31560.xlsx")
+MEMORY_FILE = os.path.join(DATA_DIR, "face_memory.pkl")
+BEST_MEMORY_FILE = os.path.join(DATA_DIR, "face_memory_best.pkl")
 
 def load_best_db():
     if not os.path.exists(BEST_MEMORY_FILE): return {}
@@ -90,29 +93,35 @@ def add_to_best_db(student_id, student_name, emb, prob, symmetry):
 global_best_db = load_best_db()
 
 def load_face_db():
-    if not os.path.exists(MEMORY_FILE): 
+    if not os.path.exists(MEMORY_FILE):
+        print("📂 No existing DB found. Starting fresh.")
         return {}
+    
     try:
         with open(MEMORY_FILE, "rb") as f:
             db = pickle.load(f)
-        errors = validate_db_integrity(db)
-        if errors:
-            print(f"⚠️ DB CORRUPTION DETECTED: {len(errors)} errors")
-            for e in errors[:5]: 
-                print(f"  - {e}")
-            # Auto-restore from backup
-            if os.path.exists(MEMORY_FILE + ".backup"):
-                print("🔄 Restoring from backup...")
-                with open(MEMORY_FILE + ".backup", "rb") as f:
-                    db = pickle.load(f)
-                # Validate backup too
-                backup_errors = validate_db_integrity(db)
-                if backup_errors:
-                    print(f"💥 Backup also corrupted ({len(backup_errors)} errors). Starting fresh.")
-                    return {}
+        
+        total_embs = sum(len(v["embeddings"]) for v in db.values())
+        print(f"📂 DB LOADED: {len(db)} students, {total_embs} total embeddings from {MEMORY_FILE}")
+        
+        # If DB is empty but file exists, warn
+        if len(db) == 0:
+            print("⚠️ Warning: DB file exists but contains zero students.")
+        
         return db
+        
     except Exception as e:
         print(f"💥 DB LOAD FAILED: {e}")
+        # Try backup
+        if os.path.exists(MEMORY_FILE + ".backup"):
+            print("🔄 Attempting backup restore...")
+            try:
+                with open(MEMORY_FILE + ".backup", "rb") as f:
+                    db = pickle.load(f)
+                print(f"📂 BACKUP RESTORED: {len(db)} students")
+                return db
+            except Exception as be:
+                print(f"💥 Backup also failed: {be}")
         return {}
 
 def save_face_db(db):
@@ -121,10 +130,19 @@ def save_face_db(db):
         if len(data["embeddings"]) > 8:
             data["embeddings"] = data["embeddings"][:8]
     
+    # 🛡️ ATOMIC SAVE: write to temp file first, then rename
+    # This prevents half-written files if Ctrl+C happens during save
+    temp_file = MEMORY_FILE + ".tmp"
+    with open(temp_file, "wb") as f:
+        pickle.dump(db, f)
+    
+    # Backup existing good file
     if os.path.exists(MEMORY_FILE):
         shutil.copy2(MEMORY_FILE, MEMORY_FILE + ".backup")
-    with open(MEMORY_FILE, "wb") as f:
-        pickle.dump(db, f)
+    
+    # Atomic rename: OS guarantees this is either complete or not happening
+    os.replace(temp_file, MEMORY_FILE)
+    
     print(f"💾 DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
 
 global_face_db = load_face_db()
