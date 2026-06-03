@@ -434,7 +434,6 @@ def process_frame(image_b64):
 
                         # 🎯 PERFORMANCE: Skip expensive face extraction if recently recognized
             if person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 3.0:
-                # Just update position, reuse cached identity
                 current_frame_tracks[track_id] = person
                 faces_out.append({
                     "box": [x1, y1, x2 - x1, y2 - y1],
@@ -521,6 +520,7 @@ def process_frame(image_b64):
                                 person["name"] = name
                                 person["status"] = "known"
                                 person["last_recognized"] = current_time
+                                
                                 existing = global_face_db[sid]["embeddings"]
                                 
                                                                 # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new

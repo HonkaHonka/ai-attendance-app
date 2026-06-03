@@ -48,7 +48,7 @@ function App() {
   const [isRosterVisible, setIsRosterVisible] = useState(true);
   const [isDashboardOpen, setIsDashboardOpen] = useState(false);
   const [dbHealth, setDbHealth] = useState(null);
-  const [isUpdateMode, setIsUpdateMode] = useState(false);
+  
   // REFS
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
@@ -163,7 +163,7 @@ function App() {
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
       wsRef.current.onopen = () => { 
         // 🎯 5 FPS throttle — send every 200ms instead of 60 FPS
-        frameIntervalRef.current = setInterval(sendFrameToWebSocket, 200);
+                frameIntervalRef.current = setInterval(sendFrameToWebSocket, 100);
       };
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
@@ -413,8 +413,8 @@ function App() {
           return;
         }
         
-        // Normal assign behavior for unknown/scanning
-        if ((face.status === 'unknown' || face.status === 'scanning')) {
+                // Normal assign behavior for unknown/scanning/known
+        if ((face.status === 'unknown' || face.status === 'scanning' || face.status === 'known')) {
           const video = surveillanceWebcamRef.current?.video;
           if (!video || video.readyState < 2) return;
           
@@ -842,20 +842,7 @@ function App() {
               🔴 Live Classroom Tracking
             </h2>
             <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexShrink: 0 }}>
-              <button onClick={() => setIsUpdateMode(!isUpdateMode)} style={{ 
-                background: isUpdateMode ? '#ffcb05' : '#2f3254', 
-                color: isUpdateMode ? '#1a1a2e' : '#ffcb05', 
-                border: '2px solid #ffcb05', 
-                padding: '8px 16px', 
-                borderRadius: '5px', 
-                fontWeight: 'bold', 
-                cursor: 'pointer',
-                fontSize: 'clamp(12px, 1.2vw, 14px)',
-                whiteSpace: 'nowrap',
-                flexShrink: 0
-              }}>
-                {isUpdateMode ? '✅ Done Updating' : '🔄 Update'}
-              </button>
+              
               <button onClick={fetchDbHealth} style={{ 
                 background: '#2f3254', 
                 color: '#ffcb05', 
@@ -925,26 +912,7 @@ function App() {
             )}
           </div>
 
-          {/* 🔄 UPDATE MODE INDICATOR */}
-          {isUpdateMode && (
-            <div style={{ 
-              position: 'absolute', 
-              top: '115px', 
-              left: '50%', 
-              transform: 'translateX(-50%)', 
-              zIndex: 3010,
-              background: 'rgba(255, 193, 7, 0.95)',
-              color: '#1a1a2e',
-              padding: '8px 20px',
-              borderRadius: '20px',
-              fontSize: '14px',
-              fontWeight: 'bold',
-              pointerEvents: 'none',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
-            }}>
-              🔄 UPDATE MODE ACTIVE — Click any green box to unassign that student
-            </div>
-          )}
+          
 
                     {/* 📊 DB HEALTH DASHBOARD — RIGHT SIDE PANEL */}
           {isDashboardOpen && dbHealth && (
