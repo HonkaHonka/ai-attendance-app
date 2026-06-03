@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -89,8 +89,30 @@ def add_to_best_db(student_id, student_name, emb, prob, symmetry):
 global_best_db = load_best_db()
 
 def load_face_db():
-    if not os.path.exists(MEMORY_FILE): return {}
-    with open(MEMORY_FILE, "rb") as f: return pickle.load(f)
+    if not os.path.exists(MEMORY_FILE): 
+        return {}
+    try:
+        with open(MEMORY_FILE, "rb") as f:
+            db = pickle.load(f)
+        errors = validate_db_integrity(db)
+        if errors:
+            print(f"⚠️ DB CORRUPTION DETECTED: {len(errors)} errors")
+            for e in errors[:5]: 
+                print(f"  - {e}")
+            # Auto-restore from backup
+            if os.path.exists(MEMORY_FILE + ".backup"):
+                print("🔄 Restoring from backup...")
+                with open(MEMORY_FILE + ".backup", "rb") as f:
+                    db = pickle.load(f)
+                # Validate backup too
+                backup_errors = validate_db_integrity(db)
+                if backup_errors:
+                    print(f"💥 Backup also corrupted ({len(backup_errors)} errors). Starting fresh.")
+                    return {}
+        return db
+    except Exception as e:
+        print(f"💥 DB LOAD FAILED: {e}")
+        return {}
 
 def save_face_db(db):
     # 🛡️ DEFENSIVE CAP: truncate any race-condition overflow
@@ -109,7 +131,23 @@ global_face_db = load_face_db()
 def cosine_similarity(a, b):
     a, b = np.array(a).flatten(), np.array(b).flatten()
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
+def validate_db_integrity(db):
+    """Check for physical corruption: NaN, wrong shape, missing keys."""
+    errors = []
+    for sid, data in db.items():
+        if not isinstance(data, dict):
+            errors.append(f"{sid}: not a dict")
+            continue
+        if "embeddings" not in data or "name" not in data:
+            errors.append(f"{sid}: missing required keys")
+            continue
+        for i, emb in enumerate(data["embeddings"]):
+            arr = np.array(emb)
+            if arr.shape != (512,):
+                errors.append(f"{sid}: emb[{i}] shape {arr.shape} != (512,)")
+            if np.isnan(arr).any() or np.isinf(arr).any():
+                errors.append(f"{sid}: emb[{i}] contains NaN/Inf")
+    return errors
 try:
     df = pd.read_excel(DATA_FILE)
     df.columns = df.columns.str.strip()
@@ -177,6 +215,20 @@ def db_health():
         "students": report
     }
 
+@app.get("/api/health")
+def health():
+    """Quick system health check for IT monitoring."""
+    errors = validate_db_integrity(global_face_db)
+    return {
+        "status": "ok" if len(errors) == 0 else "degraded",
+        "camera": "connected",
+        "db_students": len(global_face_db),
+        "db_corrupted": len(errors) > 0,
+        "db_errors": errors[:5],
+        "db_file_size_kb": round(os.path.getsize(MEMORY_FILE) / 1024, 1) if os.path.exists(MEMORY_FILE) else 0,
+        "session_active": session_stats["start_time"] is not None,
+        "total_embeddings": sum(len(v["embeddings"]) for v in global_face_db.values())
+    }
 
 @app.get("/api/session-report")
 def session_report():
@@ -360,6 +412,19 @@ def process_frame(image_b64):
             })
             person["last_seen"] = current_time
 
+                        # 🎯 PERFORMANCE: Skip expensive face extraction if recently recognized
+            if person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 3.0:
+                # Just update position, reuse cached identity
+                current_frame_tracks[track_id] = person
+                faces_out.append({
+                    "box": [x1, y1, x2 - x1, y2 - y1],
+                    "track_id": track_id,
+                    "student_id": person["student_id"],
+                    "name": person["name"],
+                    "status": "known"
+                })
+                continue
+
             head_h = int((y2 - y1) * 0.50)
             hx1 = max(0, x1 - 20)
             hy1 = max(0, y1 - 20)
@@ -435,7 +500,7 @@ def process_frame(image_b64):
                                 person["student_id"] = sid
                                 person["name"] = name
                                 person["status"] = "known"
-
+                                person["last_recognized"] = current_time
                                 existing = global_face_db[sid]["embeddings"]
                                 
                                                                 # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new
@@ -546,9 +611,8 @@ class AssignPayload(BaseModel):
     student_id: str
     student_name: str
     image: str
-    box: list | None = None   # ← CHANGED: explicitly allows null
-    is_manual: bool = False
     box: Optional[list] = None
+    is_manual: bool = False
     
 @app.post("/api/assign-face")
 def assign_face(p: AssignPayload):

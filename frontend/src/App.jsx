@@ -52,7 +52,7 @@ function App() {
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
   const inspectCanvasRef = useRef(null); 
-
+  const frameIntervalRef = useRef(null);
   // ==========================================
   // API CALLS
   // ==========================================
@@ -140,7 +140,6 @@ function App() {
   const sendFrameToWebSocket = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
       const video = surveillanceWebcamRef.current.video;
-      
       if (video.videoWidth > 0) {
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = AI_W;
@@ -148,10 +147,7 @@ function App() {
         const ctx = tempCanvas.getContext('2d');
         ctx.drawImage(video, 0, 0, AI_W, AI_H);
         const imageSrc = tempCanvas.toDataURL('image/jpeg', 0.6); 
-        
         wsRef.current.send(JSON.stringify({ image: imageSrc }));
-      } else {
-        requestAnimationFrame(sendFrameToWebSocket);
       }
     }
   };
@@ -162,7 +158,10 @@ function App() {
     } else {
       setIsSurveillanceActive(true);
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
-      wsRef.current.onopen = () => { sendFrameToWebSocket(); };
+      wsRef.current.onopen = () => { 
+        // 🎯 5 FPS throttle — send every 200ms instead of 60 FPS
+        frameIntervalRef.current = setInterval(sendFrameToWebSocket, 200);
+      };
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.faces) {
@@ -173,9 +172,6 @@ function App() {
           });
           setAttendanceRecords(prev => ({ ...prev, ...newRecords }));
         }
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          requestAnimationFrame(sendFrameToWebSocket);
-        }
       };
       wsRef.current.onerror = () => { stopSurveillance(); };
     }
@@ -183,7 +179,14 @@ function App() {
 
   const stopSurveillance = () => {
     setIsSurveillanceActive(false);
-    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
+    if (wsRef.current) { 
+      wsRef.current.close(); 
+      wsRef.current = null; 
+    }
     setDetectedFaces([]);
     setLiveZoom(null);
     setQuickEnrollData(null);
@@ -599,12 +602,9 @@ function App() {
       if (!response.ok) {
         let errMsg;
         if (response.status === 422) {
-          // Pydantic validation error
-          const errData = await response.json();
-          errMsg = errData.detail?.map(d => `${d.loc?.join('.')}: ${d.msg}`).join('; ') 
-                   || JSON.stringify(errData.detail);
+          errMsg = result.detail?.map(d => `${d.loc?.join('.')}: ${d.msg}`).join('; ') 
+                   || JSON.stringify(result.detail);
         } else {
-          const result = await response.json().catch(() => ({}));
           errMsg = result.detail || result.message || `Server error: ${response.status}`;
         }
         throw new Error(errMsg);
