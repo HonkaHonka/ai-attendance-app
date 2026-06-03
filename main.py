@@ -377,8 +377,8 @@ def process_frame(image_b64):
     
     results = yolo_person.track(
         frame_bgr,
-        conf=0.45,
-        iou=0.40,
+        conf=0.60,      # ← Raised from 0.45
+        iou=0.50,       # ← Raised from 0.40 (less overlapping boxes)
         classes=[0],
         tracker="botsort.yaml",
         persist=True,
@@ -401,8 +401,17 @@ def process_frame(image_b64):
             x1, y1, x2, y2 = map(int, box)
             track_id = int(track_id)
             
-            if (x2 - x1) < 40 or (y2 - y1) < 40:
+            box_w = x2 - x1
+            box_h = y2 - y1
+            
+            # Minimum size
+            if box_w < 50 or box_h < 80:
                 continue
+            
+            # Aspect ratio: person boxes should be taller than wide
+            aspect = box_h / box_w
+            if aspect < 1.0 or aspect > 4.0:
+                continue  # Too square or too skinny = not a person
 
             person = live_tracker_memory.get(track_id, {
                 "student_id": None,
