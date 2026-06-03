@@ -791,13 +791,48 @@ function App() {
       {isSurveillanceActive && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: '#000', zIndex: 3000, display: 'flex', flexDirection: 'column' }}>
           
-            <div style={{ padding: '15px 30px', background: '#111', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 3010 }}>
-            <h2 style={{ margin: 0, color: '#ffcb05' }}>🔴 Live Classroom Tracking</h2>
-            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-              <button onClick={fetchDbHealth} style={{ background: '#2f3254', color: '#ffcb05', border: '2px solid #ffcb05', padding: '8px 20px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
+           <div style={{ 
+                padding: '12px 20px', 
+                background: '#111', 
+                color: 'white', 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                alignItems: 'center', 
+                zIndex: 3010,
+                minHeight: '50px',
+                flexWrap: 'wrap',
+                gap: '10px'
+              }}>
+            <h2 style={{ margin: 0, color: '#ffcb05', fontSize: 'clamp(16px, 2vw, 22px)', whiteSpace: 'nowrap' }}>
+              🔴 Live Classroom Tracking
+            </h2>
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexShrink: 0 }}>
+              <button onClick={fetchDbHealth} style={{ 
+                background: '#2f3254', 
+                color: '#ffcb05', 
+                border: '2px solid #ffcb05', 
+                padding: '8px 16px', 
+                borderRadius: '5px', 
+                fontWeight: 'bold', 
+                cursor: 'pointer',
+                fontSize: 'clamp(12px, 1.2vw, 14px)',
+                whiteSpace: 'nowrap',
+                flexShrink: 0
+              }}>
                 📊 DB Health
               </button>
-              <button onClick={stopSurveillance} style={{ background: '#dc3545', color: 'white', border: 'none', padding: '10px 25px', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}>
+              <button onClick={stopSurveillance} style={{ 
+                background: '#dc3545', 
+                color: 'white', 
+                border: 'none', 
+                padding: '8px 16px', 
+                borderRadius: '5px', 
+                fontWeight: 'bold', 
+                cursor: 'pointer',
+                fontSize: 'clamp(12px, 1.2vw, 14px)',
+                whiteSpace: 'nowrap',
+                flexShrink: 0
+              }}>
                 Close Tracker
               </button>
             </div>
