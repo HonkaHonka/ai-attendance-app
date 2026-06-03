@@ -40,7 +40,48 @@ face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
 DATA_FILE = "data/KHC_REGISTERED_STUDENTS_31560.xlsx"
 MEMORY_FILE = "data/face_memory.pkl"
+BEST_MEMORY_FILE = "data/face_memory_best.pkl"
 os.makedirs("data", exist_ok=True)
+
+def load_best_db():
+    if not os.path.exists(BEST_MEMORY_FILE): return {}
+    with open(BEST_MEMORY_FILE, "rb") as f: return pickle.load(f)
+
+def save_best_db(db):
+    with open(BEST_MEMORY_FILE, "wb") as f:
+        pickle.dump(db, f)
+    print(f"🏆 BEST DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
+
+def is_high_quality_embedding(prob, symmetry):
+    return prob > 0.99 and symmetry > 0.80
+
+def add_to_best_db(student_id, student_name, emb, prob, symmetry):
+    if student_id not in global_best_db:
+        global_best_db[student_id] = {"name": student_name, "embeddings": [], "quality": []}
+    
+    best_existing = global_best_db[student_id]["embeddings"]
+    
+    # Redundancy check for best DB (stricter: only distinct angles)
+    if len(best_existing) > 0:
+        sims = [cosine_similarity(emb.tolist(), e) for e in best_existing]
+        if max(sims) > 0.90:
+            return False  # Already have this angle in best DB
+    
+    best_existing.append(emb.tolist())
+    global_best_db[student_id]["quality"].append({"prob": prob, "symmetry": symmetry})
+    
+    # If over 8, evict the lowest quality embedding
+    if len(best_existing) > 8:
+        qualities = global_best_db[student_id]["quality"]
+        scores = [q["prob"] * q["symmetry"] for q in qualities]
+        min_idx = scores.index(min(scores))
+        best_existing.pop(min_idx)
+        qualities.pop(min_idx)
+    
+    save_best_db(global_best_db)
+    return True
+
+global_best_db = load_best_db()
 
 def load_face_db():
     if not os.path.exists(MEMORY_FILE): return {}
@@ -387,15 +428,15 @@ def process_frame(image_b64):
 
                                 existing = global_face_db[sid]["embeddings"]
                                 
-                                # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new
+                                                                # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new
                                 if (0.72 < score < 0.94 and 
-                                    probs_arr[best_idx] > 0.99 and 
+                                    probs_arr[best_idx] > 0.97 and   # ← Lowered from 0.99 to capture more angles
                                     len(existing) < 8):
                                     
                                     # Check if this angle/view is already represented
                                     if len(existing) > 0:
                                         sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing]
-                                        if max(sims_to_existing) > 0.88:
+                                        if max(sims_to_existing) > 0.85:  # ← Lowered from 0.88 to allow more diversity
                                             # Already have this angle, skip to prevent bloat
                                             pass
                                         else:
@@ -409,6 +450,10 @@ def process_frame(image_b64):
                                             if symmetry > 0.60:  # 🎯 Accept side profiles for classroom reality
                                                 existing.append(emb.tolist())
                                                 save_required = True
+                                                
+                                                # 🏆 BEST DB: Only save if truly excellent quality
+                                                if probs_arr[best_idx] > 0.99 and symmetry > 0.80:
+                                                    add_to_best_db(sid, name, emb, float(probs_arr[best_idx]), symmetry)
                                                 
                                                 session_stats["embeddings_added"][sid] = session_stats["embeddings_added"].get(sid, 0) + 1
                                                 session_stats["avg_symmetry"].append(symmetry)
@@ -623,9 +668,13 @@ def assign_face(p: AssignPayload):
                 "confidence": round(float(probs_arr[best_idx]), 3)
             }
     
-    # Save the high-quality seed
+        # Save the high-quality seed
     existing.append(emb.tolist())
     save_face_db(global_face_db)
+    
+    # 🏆 Save to BEST DB if this is truly excellent quality
+    if is_high_quality_embedding(float(probs_arr[best_idx]), symmetry):
+        add_to_best_db(p.student_id, p.student_name, emb, float(probs_arr[best_idx]), symmetry)
     
     # Clear tracker so next frame recognizes immediately
     global live_tracker_memory
