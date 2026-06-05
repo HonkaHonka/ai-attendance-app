@@ -418,7 +418,8 @@ def process_frame(image_b64):
         classes=[0],
         tracker="botsort.yaml",
         persist=True,
-        verbose=False
+        verbose=False,
+        device="GPU"
     )
     
     faces_out = []
