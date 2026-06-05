@@ -58,6 +58,8 @@ function App() {
   const frameIntervalRef = useRef(null);
   const waitingForResponse = useRef(false);
   const frameLoopRef = useRef(null);
+  const surveillanceActiveRef = useRef(false);
+
 
   const getCanvasContentBounds = (canvas) => {
     const rect = canvas.getBoundingClientRect();
@@ -167,7 +169,7 @@ function App() {
     // ==========================================
   // WEBSOCKET & SURVEILLANCE — ACK-BASED PACING
   // ==========================================
-  const sendFrameToWebSocket = () => {
+    const sendFrameToWebSocket = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !waitingForResponse.current) {
       const video = surveillanceWebcamRef.current?.video;
       if (video && video.readyState >= 2 && video.videoWidth > 0) {
@@ -185,28 +187,27 @@ function App() {
   };
 
   const runFrameLoop = () => {
-    if (isSurveillanceActive) {
+    if (surveillanceActiveRef.current) {   // ← USE REF, NOT STATE
       sendFrameToWebSocket();
     }
     frameLoopRef.current = requestAnimationFrame(runFrameLoop);
   };
 
-  const toggleSurveillance = () => {
+    const toggleSurveillance = () => {
     if (isSurveillanceActive) {
       stopSurveillance();
     } else {
       setIsSurveillanceActive(true);
+      surveillanceActiveRef.current = true;   // ← REAL-TIME LOOP FLAG
       waitingForResponse.current = false;
       
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
       
       wsRef.current.onopen = () => {
-        // Start the loop — it will naturally pace itself to backend speed
         frameLoopRef.current = requestAnimationFrame(runFrameLoop);
       };
       
       wsRef.current.onmessage = (event) => {
-        // 🎯 CRITICAL: Allow next frame to send immediately
         waitingForResponse.current = false;
         
         const data = JSON.parse(event.data);
@@ -228,6 +229,7 @@ function App() {
 
   const stopSurveillance = () => {
     setIsSurveillanceActive(false);
+    surveillanceActiveRef.current = false;   // ← STOP THE LOOP
     if (frameLoopRef.current) {
       cancelAnimationFrame(frameLoopRef.current);
       frameLoopRef.current = null;
