@@ -1,3 +1,5 @@
+import os
+os.environ["OPENVINO_DEVICE"] = "GPU"  # Force OpenVINO AUTO to prefer GPU
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
