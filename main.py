@@ -30,16 +30,23 @@ device = torch.device("cpu")
 print(f"✅ RUNNING ON {device}")
 
 print("🔹 Loading YOLOv8n (PERSON TRACKING)...")
-yolo_person = YOLO("yolov8n_openvino_model/", task="detect") 
-try:
-    # Access the OpenVINO compiled model properties
-    ov_model = yolo_person.predictor.model.ov_compiled_model
-    device_name = ov_model.get_property("DEVICE_NAME")
-    print(f"🔥 YOLO OpenVINO Device: {device_name}")
-except Exception as e:
-    print(f"⚠️ Could not detect OpenVINO device property: {e}")
+yolo_person = YOLO("yolov8n_openvino_model/", task="detect")
 
-print(f"🔥 YOLO device: {yolo_person.device if hasattr(yolo_person, 'device') else 'unknown'}")
+# 🎯 CRITICAL: OpenVINO predictor is lazy — it only exists after first inference
+import numpy as np
+dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+_ = yolo_person.track(dummy_frame, verbose=False, persist=True)
+
+# NOW check the device (predictor is guaranteed to exist)
+try:
+    model = yolo_person.predictor.model
+    if hasattr(model, 'ov_compiled_model'):
+        device_name = model.ov_compiled_model.get_property("DEVICE_NAME")
+        print(f"🔥 YOLO OpenVINO Device: {device_name}")
+    else:
+        print(f"⚠️ YOLO is NOT running OpenVINO — backend: {type(model).__name__}")
+except Exception as e:
+    print(f"⚠️ Device check error: {e}")
 
 print("🔹 Loading Face Quality Gate (MTCNN)...")
 mtcnn = MTCNN(keep_all=False, device=device)
@@ -386,7 +393,8 @@ def recognize_face(emb):
 
 def process_frame(image_b64):
     global live_tracker_memory
-    
+    t_start = time.time()
+
     if not image_b64:
         return []
     if "," in image_b64:
@@ -662,7 +670,9 @@ def process_frame(image_b64):
     if current_time - process_frame._last_mem_report > 10:
         print(f"🧠 MEM-TRACK: {len(live_tracker_memory)} active tracks | DB: {len(global_face_db)} students")
         process_frame._last_mem_report = current_time
-
+    elapsed = (time.time() - t_start) * 1000
+    if elapsed > 50:  # Only print slow frames
+        print(f"⏱️ Frame processed in {elapsed:.1f}ms")
     return faces_out
 
 @app.websocket("/ws/surveillance")
