@@ -34,21 +34,10 @@ print(f"✅ RUNNING ON {device}")
 print("🔹 Loading YOLOv8n (PERSON TRACKING)...")
 yolo_person = YOLO("yolov8n_openvino_model/", task="detect")
 
-# 🎯 CRITICAL: OpenVINO predictor is lazy — it only exists after first inference
-import numpy as np
+# 🎯 Warmup: forces predictor initialization so first real frame is fast
 dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
 _ = yolo_person.track(dummy_frame, verbose=False, persist=True)
-
-# NOW check the device (predictor is guaranteed to exist)
-try:
-    model = yolo_person.predictor.model
-    if hasattr(model, 'ov_compiled_model'):
-        device_name = model.ov_compiled_model.get_property("DEVICE_NAME")
-        print(f"🔥 YOLO OpenVINO Device: {device_name}")
-    else:
-        print(f"⚠️ YOLO is NOT running OpenVINO — backend: {type(model).__name__}")
-except Exception as e:
-    print(f"⚠️ Device check error: {e}")
+print("✅ YOLO OpenVINO model loaded")
 
 print("🔹 Loading Face Quality Gate (MTCNN)...")
 mtcnn = MTCNN(keep_all=False, device=device)
