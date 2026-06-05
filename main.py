@@ -433,7 +433,7 @@ def process_frame(image_b64):
             person["last_seen"] = current_time
 
                         # 🎯 PERFORMANCE: Skip expensive face extraction if recently recognized
-            if person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 3.0:
+            if person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 7.0:
                 current_frame_tracks[track_id] = person
                 faces_out.append({
                     "box": [x1, y1, x2 - x1, y2 - y1],
@@ -616,11 +616,24 @@ async def ws_surveillance(ws: WebSocket):
     await ws.accept()
     global live_tracker_memory
     live_tracker_memory.clear()
+    
+    is_processing = False  # 🎯 Frame dropping flag
+    
     try:
         while True:
             data = await ws.receive_json()
-            faces = await asyncio.to_thread(process_frame, data["image"])
-            await ws.send_json({"status": "success", "faces": faces})
+            
+            # If backend is still busy, drop this frame and wait for the next one
+            if is_processing:
+                continue
+            
+            is_processing = True
+            try:
+                faces = await asyncio.to_thread(process_frame, data["image"])
+                await ws.send_json({"status": "success", "faces": faces})
+            finally:
+                is_processing = False
+                
     except WebSocketDisconnect:
         live_tracker_memory.clear()
 

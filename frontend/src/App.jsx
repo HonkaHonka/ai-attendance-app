@@ -56,6 +56,29 @@ function App() {
   const surveillanceWebcamRef = useRef(null); 
   const inspectCanvasRef = useRef(null); 
   const frameIntervalRef = useRef(null);
+
+
+  const getCanvasContentBounds = (canvas) => {
+    const rect = canvas.getBoundingClientRect();
+    const canvasRatio = AI_W / AI_H;
+    const rectRatio = rect.width / rect.height;
+
+    let contentWidth, contentHeight, offsetX, offsetY;
+
+    if (rectRatio > canvasRatio) {
+      contentHeight = rect.height;
+      contentWidth = contentHeight * canvasRatio;
+      offsetX = (rect.width - contentWidth) / 2;
+      offsetY = 0;
+    } else {
+      contentWidth = rect.width;
+      contentHeight = contentWidth / canvasRatio;
+      offsetX = 0;
+      offsetY = (rect.height - contentHeight) / 2;
+    }
+    return { contentWidth, contentHeight, offsetX, offsetY, rect };
+  };
+
   // ==========================================
   // API CALLS
   // ==========================================
@@ -205,6 +228,9 @@ function App() {
     // ==========================================
   // CANVAS OVERLAY DRAWING — HEAD LEVEL ONLY
   // ==========================================
+    // ==========================================
+  // CANVAS OVERLAY — NAME TAGS ONLY (NO BODY BOXES)
+  // ==========================================
   useEffect(() => {
     if (canvasRef.current && detectedFaces) {
       const canvas = canvasRef.current;
@@ -212,74 +238,58 @@ function App() {
       ctx.clearRect(0, 0, AI_W, AI_H);
 
       detectedFaces.forEach(face => {
-        // Use head_box from backend, or estimate from body box
-        let hx, hy, hw, hh;
-        if (face.head_box) {
-          [hx, hy, hw, hh] = face.head_box;
-        } else {
-          const [x, y, w, h] = face.box;
-          hw = w * 0.30;
-          hh = h * 0.22;
-          hx = x + (w - hw) / 2;
-          hy = y - hh * 0.2;
-          if (hy < 0) hy = 0;
-        }
+        const [x, y, w, h] = face.box; // YOLO body box — accurate tracking anchor
 
-        // Draw small head rectangle
-        ctx.beginPath();
-        ctx.lineWidth = 3;
-        if (face.status === 'known') { 
-          ctx.strokeStyle = '#28a745'; 
-        } else if (face.status === 'scanning') { 
-          ctx.strokeStyle = '#ffcb05'; 
+        // Determine text and color based on status
+        let text, bgColor;
+        if (face.status === 'known') {
+          text = face.name;
+          bgColor = 'rgba(40, 167, 69, 0.95)';
+        } else if (face.status === 'scanning') {
+          text = 'Scanning...';
+          bgColor = 'rgba(255, 203, 5, 0.95)';
         } else if (face.status === 'occluded') {
-          ctx.strokeStyle = '#ff9800';
-        } else { 
-          ctx.strokeStyle = '#dc3545'; 
+          text = 'Occluded';
+          bgColor = 'rgba(255, 152, 0, 0.95)';
+        } else {
+          text = 'Unknown';
+          bgColor = 'rgba(220, 53, 69, 0.95)';
         }
-        ctx.rect(hx, hy, hw, hh);
-        ctx.stroke();
 
-        // Game-style name tag above head
-        if (face.name && face.name !== "Scanning..." && face.name !== "No Face" && face.name !== "Occluded") {
-          ctx.font = 'bold 16px Arial';
-          const text = face.name;
-          const textWidth = ctx.measureText(text).width;
-          const padding = 10;
-          const tagWidth = textWidth + padding * 2;
-          const tagHeight = 24;
-          const tagX = hx + hw/2 - tagWidth/2;
-          const tagY = hy - tagHeight - 8;
+        // Measure text for pill background
+        ctx.font = 'bold 18px Arial';
+        const textWidth = ctx.measureText(text).width;
+        const padding = 12;
+        const tagWidth = Math.max(textWidth + padding * 2, 80);
+        const tagHeight = 30;
 
-          // Tag background
-          ctx.fillStyle = face.status === 'known' ? 'rgba(40, 167, 69, 0.95)' : 'rgba(220, 53, 69, 0.95)';
-          ctx.fillRect(tagX, tagY, tagWidth, tagHeight);
-          
-          // Text
-          ctx.fillStyle = '#fff';
-          ctx.textAlign = 'center';
-          ctx.fillText(text, hx + hw/2, tagY + 17);
-          ctx.textAlign = 'left';
-        } 
-        else if (face.status === 'scanning') {
-          // Pulsing "?" indicator
-          ctx.fillStyle = '#ffcb05';
+        // Position: centered above the body box
+        const tagX = x + w / 2 - tagWidth / 2;
+        const tagY = y - tagHeight - 6;
+
+        // Draw pill background
+        ctx.fillStyle = bgColor;
+        if (ctx.roundRect) {
           ctx.beginPath();
-          ctx.arc(hx + hw/2, hy - 12, 10, 0, 2 * Math.PI);
+          ctx.roundRect(tagX, tagY, tagWidth, tagHeight, 6);
           ctx.fill();
-          ctx.fillStyle = '#000';
-          ctx.font = 'bold 14px Arial';
-          ctx.textAlign = 'center';
-          ctx.fillText('?', hx + hw/2, hy - 7);
-          ctx.textAlign = 'left';
+        } else {
+          ctx.fillRect(tagX, tagY, tagWidth, tagHeight);
         }
-        else if (face.status === 'occluded') {
-          ctx.fillStyle = '#ff9800';
-          ctx.font = 'bold 12px Arial';
-          ctx.textAlign = 'center';
-          ctx.fillText('⚠ Occluded', hx + hw/2, hy - 8);
-          ctx.textAlign = 'left';
-        }
+
+        // Draw text
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, x + w / 2, tagY + tagHeight / 2 + 1);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+
+        // Tiny lock-on dot at upper body (visual anchor only)
+        ctx.fillStyle = face.status === 'known' ? '#28a745' : '#dc3545';
+        ctx.beginPath();
+        ctx.arc(x + w / 2, y + h * 0.25, 4, 0, 2 * Math.PI);
+        ctx.fill();
       });
     }
   }, [detectedFaces]);
@@ -443,76 +453,94 @@ function App() {
   // ==========================================
   // MOUSE HANDLERS
   // ==========================================
-      const handleCanvasClick = (e) => {
+        const handleCanvasClick = (e) => {
     if (e.button !== 0) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = AI_W / rect.width;
-    const scaleY = AI_H / rect.height;
-    
-    const clickX = (e.clientX - rect.left) * scaleX;
-    const clickY = (e.clientY - rect.top) * scaleY;
+
+    const { contentWidth, contentHeight, offsetX, offsetY, rect } = getCanvasContentBounds(canvas);
+
+    const clickX_display = e.clientX - rect.left - offsetX;
+    const clickY_display = e.clientY - rect.top - offsetY;
+
+    // Ignore clicks on black letterbox bars
+    if (clickX_display < 0 || clickX_display > contentWidth || clickY_display < 0 || clickY_display > contentHeight) {
+      return;
+    }
+
+    const clickX = clickX_display * (AI_W / contentWidth);
+    const clickY = clickY_display * (AI_H / contentHeight);
 
     detectedFaces.forEach(face => {
-      // Use head_box for click detection (more precise)
-      const box = face.head_box || face.box;
-      const [x, y, w, h] = box;
-      
-      if (clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
+      const [x, y, w, h] = face.box;
+
+      // Expand hit area upward to include the name tag (so clicking "Unknown" text works)
+      const hitY = y - 40;
+      const hitH = h + 40;
+
+      if (clickX >= x && clickX <= x + w && clickY >= hitY && clickY <= hitY + hitH) {
         
-        // 🟢 KNOWN FACE: Click to unassign (no update button needed)
+        // 🟢 KNOWN: Click to unassign (no update button needed)
         if (face.status === 'known' && face.student_id) {
-          if (window.confirm(`Unassign ${face.name}?\n\nThis will remove their biometric data so you can reassign correctly. Other students stay untouched.`)) {
+          if (window.confirm(`Unassign ${face.name}?\n\nThis removes their biometric data so you can reassign correctly. Other students stay untouched.`)) {
             unassignStudent(face.student_id, face.name);
           }
           return;
         }
-        
-        // 🔴 UNKNOWN/SCANNING: Click to assign
+
+        // 🔴 UNKNOWN / SCANNING: Click to assign
         if (face.status === 'unknown' || face.status === 'scanning' || face.status === 'no_face') {
           const video = surveillanceWebcamRef.current?.video;
           if (!video || video.readyState < 2) return;
-          
+
           const tempCanvas = document.createElement('canvas');
           tempCanvas.width = AI_W;
           tempCanvas.height = AI_H;
           tempCanvas.getContext('2d').drawImage(video, 0, 0, AI_W, AI_H);
-          
-          const assignBox = face.box;
-          
-          setQuickEnrollData({ image: tempCanvas.toDataURL('image/jpeg', 0.8), box: assignBox, isManual: false });
-          setLiveZoom({ origBox: assignBox, isManual: false });
+
+          setQuickEnrollData({
+            image: tempCanvas.toDataURL('image/jpeg', 0.8),
+            box: face.box,
+            isManual: false
+          });
+          setLiveZoom({ origBox: face.box, isManual: false });
         }
       }
     });
   };
 
-  const handleCanvasRightClick = (e) => {
+    const handleCanvasRightClick = (e) => {
     e.preventDefault();
 
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const clickX_AI = (e.clientX - rect.left) * (AI_W / rect.width);
-    const clickY_AI = (e.clientY - rect.top) * (AI_H / rect.height);
+
+    const { contentWidth, contentHeight, offsetX, offsetY, rect } = getCanvasContentBounds(canvas);
+
+    const clickX_display = e.clientX - rect.left - offsetX;
+    const clickY_display = e.clientY - rect.top - offsetY;
+
+    if (clickX_display < 0 || clickX_display > contentWidth || clickY_display < 0 || clickY_display > contentHeight) {
+      return;
+    }
+
+    const clickX_AI = clickX_display * (AI_W / contentWidth);
+    const clickY_AI = clickY_display * (AI_H / contentHeight);
 
     detectedFaces.forEach(face => {
       const [x, y, w, h] = face.box;
-      
+
       if (clickX_AI >= x && clickX_AI <= x + w && clickY_AI >= y && clickY_AI <= y + h) {
         const boxArea = w * h;
         const canvasArea = AI_W * AI_H;
         const ratio = boxArea / canvasArea;
-        
+
         let zoomScale;
         if (ratio < 0.015) zoomScale = 3.0;
         else if (ratio < 0.04) zoomScale = 2.0;
         else zoomScale = 1.3;
-        
+
         setInspectMode({
           trackId: face.track_id,
           scale: zoomScale
@@ -522,16 +550,24 @@ function App() {
     });
   };
 
-    const handleCanvasWheel = (e) => {
+  const handleCanvasWheel = (e) => {
     e.preventDefault();
-    
+
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const mouseX = (e.clientX - rect.left) * (AI_W / rect.width);
-    const mouseY = (e.clientY - rect.top) * (AI_H / rect.height);
-    
+
+    const { contentWidth, contentHeight, offsetX, offsetY, rect } = getCanvasContentBounds(canvas);
+
+    const mouseX_display = e.clientX - rect.left - offsetX;
+    const mouseY_display = e.clientY - rect.top - offsetY;
+
+    if (mouseX_display < 0 || mouseX_display > contentWidth || mouseY_display < 0 || mouseY_display > contentHeight) {
+      return;
+    }
+
+    const mouseX = mouseX_display * (AI_W / contentWidth);
+    const mouseY = mouseY_display * (AI_H / contentHeight);
+
     let targetFace = null;
     for (const face of detectedFaces) {
       const [x, y, w, h] = face.box;
@@ -540,41 +576,34 @@ function App() {
         break;
       }
     }
-    
+
     if (e.deltaY < 0) {
       // WHEEL UP = ZOOM IN
       if (targetFace) {
         const boxArea = targetFace.box[2] * targetFace.box[3];
         const canvasArea = AI_W * AI_H;
         const ratio = boxArea / canvasArea;
-        
-                // 🎯 ADAPTIVE: If camera already focused on this person, don't zoom much
-        const isCameraFocused = cameraFocus.mode === 'focused' && 
-                                cameraFocus.target?.track_id === targetFace.track_id;
-        
+
         let zoomScale;
-        if (isCameraFocused) {
-          zoomScale = 1.1; // Already large - just a tiny nudge for inspection
-        } else if (ratio < 0.003) zoomScale = 5.0;
+        if (ratio < 0.003) zoomScale = 5.0;
         else if (ratio < 0.008) zoomScale = 4.0;
         else if (ratio < 0.02) zoomScale = 3.0;
         else if (ratio < 0.05) zoomScale = 2.0;
         else zoomScale = 1.3;
-        
+
         setWheelZoom({
           centerX: mouseX,
           centerY: mouseY,
           scale: zoomScale,
           trackId: targetFace.track_id,
-          faceBox: targetFace.face_box || null
+          faceBox: null
         });
         setInspectMode(null);
       } else {
-        // Empty area zoom (YOLO missed them) — default high zoom
         setWheelZoom({
           centerX: mouseX,
           centerY: mouseY,
-          scale: 3.5,  // Higher default for back-row discovery
+          scale: 3.5,
           trackId: null,
           faceBox: null
         });
