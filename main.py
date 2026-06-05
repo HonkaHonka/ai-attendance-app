@@ -1,5 +1,4 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -18,8 +17,6 @@ from facenet_pytorch import MTCNN, InceptionResnetV1
 from typing import Dict
 import time
 import shutil
-from typing import Optional
-
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -30,23 +27,7 @@ device = torch.device("cpu")
 print(f"✅ RUNNING ON {device}")
 
 print("🔹 Loading YOLOv8n (PERSON TRACKING)...")
-yolo_person = YOLO("yolov8n_openvino_model/", task="detect")
-
-# 🎯 CRITICAL: OpenVINO predictor is lazy — it only exists after first inference
-import numpy as np
-dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-_ = yolo_person.track(dummy_frame, verbose=False, persist=True)
-
-# NOW check the device (predictor is guaranteed to exist)
-try:
-    model = yolo_person.predictor.model
-    if hasattr(model, 'ov_compiled_model'):
-        device_name = model.ov_compiled_model.get_property("DEVICE_NAME")
-        print(f"🔥 YOLO OpenVINO Device: {device_name}")
-    else:
-        print(f"⚠️ YOLO is NOT running OpenVINO — backend: {type(model).__name__}")
-except Exception as e:
-    print(f"⚠️ Device check error: {e}")
+yolo_person = YOLO("yolov8n_openvino_model/", task="detect") 
 
 print("🔹 Loading Face Quality Gate (MTCNN)...")
 mtcnn = MTCNN(keep_all=False, device=device)
@@ -54,110 +35,19 @@ mtcnn = MTCNN(keep_all=False, device=device)
 print("🔹 Loading Face Embedding Model...")
 face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-DATA_FILE = os.path.join(DATA_DIR, "KHC_REGISTERED_STUDENTS_31560.xlsx")
-MEMORY_FILE = os.path.join(DATA_DIR, "face_memory.pkl")
-BEST_MEMORY_FILE = os.path.join(DATA_DIR, "face_memory_best.pkl")
-
-def load_best_db():
-    if not os.path.exists(BEST_MEMORY_FILE): return {}
-    with open(BEST_MEMORY_FILE, "rb") as f: return pickle.load(f)
-
-def save_best_db(db):
-    for sid, data in db.items():
-        if len(data["embeddings"]) > 8:
-            data["embeddings"] = data["embeddings"][:8]
-            data["quality"] = data["quality"][:8]
-    
-    with open(BEST_MEMORY_FILE, "wb") as f:
-        pickle.dump(db, f)
-    print(f"🏆 BEST DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
-
-def is_high_quality_embedding(prob, symmetry):
-    return prob > 0.99 and symmetry > 0.80
-
-def add_to_best_db(student_id, student_name, emb, prob, symmetry):
-    if student_id not in global_best_db:
-        global_best_db[student_id] = {"name": student_name, "embeddings": [], "quality": []}
-    
-    best_existing = global_best_db[student_id]["embeddings"]
-    
-    # Redundancy check for best DB (stricter: only distinct angles)
-    if len(best_existing) > 0:
-        sims = [cosine_similarity(emb.tolist(), e) for e in best_existing]
-        if max(sims) > 0.90:
-            return False  # Already have this angle in best DB
-    
-    best_existing.append(emb.tolist())
-    global_best_db[student_id]["quality"].append({"prob": prob, "symmetry": symmetry})
-    
-    # If over 8, evict the lowest quality embedding
-    if len(best_existing) > 8:
-        qualities = global_best_db[student_id]["quality"]
-        scores = [q["prob"] * q["symmetry"] for q in qualities]
-        min_idx = scores.index(min(scores))
-        best_existing.pop(min_idx)
-        qualities.pop(min_idx)
-    
-    save_best_db(global_best_db)
-    return True
-
-global_best_db = load_best_db()
+DATA_FILE = "data/KHC_REGISTERED_STUDENTS_31560.xlsx"
+MEMORY_FILE = "data/face_memory.pkl"
+os.makedirs("data", exist_ok=True)
 
 def load_face_db():
-    if not os.path.exists(MEMORY_FILE):
-        print("📂 No existing DB found. Starting fresh.")
-        return {}
-    
-    try:
-        with open(MEMORY_FILE, "rb") as f:
-            db = pickle.load(f)
-        
-        total_embs = sum(len(v["embeddings"]) for v in db.values())
-        print(f"📂 DB LOADED: {len(db)} students, {total_embs} total embeddings from {MEMORY_FILE}")
-        
-        # If DB is empty but file exists, warn
-        if len(db) == 0:
-            print("⚠️ Warning: DB file exists but contains zero students.")
-        
-        return db
-        
-    except Exception as e:
-        print(f"💥 DB LOAD FAILED: {e}")
-        # Try backup
-        if os.path.exists(MEMORY_FILE + ".backup"):
-            print("🔄 Attempting backup restore...")
-            try:
-                with open(MEMORY_FILE + ".backup", "rb") as f:
-                    db = pickle.load(f)
-                print(f"📂 BACKUP RESTORED: {len(db)} students")
-                return db
-            except Exception as be:
-                print(f"💥 Backup also failed: {be}")
-        return {}
+    if not os.path.exists(MEMORY_FILE): return {}
+    with open(MEMORY_FILE, "rb") as f: return pickle.load(f)
 
 def save_face_db(db):
-    # 🛡️ DEFENSIVE CAP: truncate any race-condition overflow
-    for sid, data in db.items():
-        if len(data["embeddings"]) > 8:
-            data["embeddings"] = data["embeddings"][:8]
-    
-    # 🛡️ ATOMIC SAVE: write to temp file first, then rename
-    # This prevents half-written files if Ctrl+C happens during save
-    temp_file = MEMORY_FILE + ".tmp"
-    with open(temp_file, "wb") as f:
-        pickle.dump(db, f)
-    
-    # Backup existing good file
     if os.path.exists(MEMORY_FILE):
         shutil.copy2(MEMORY_FILE, MEMORY_FILE + ".backup")
-    
-    # Atomic rename: OS guarantees this is either complete or not happening
-    os.replace(temp_file, MEMORY_FILE)
-    
+    with open(MEMORY_FILE, "wb") as f:
+        pickle.dump(db, f)
     print(f"💾 DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
 
 global_face_db = load_face_db()
@@ -165,23 +55,7 @@ global_face_db = load_face_db()
 def cosine_similarity(a, b):
     a, b = np.array(a).flatten(), np.array(b).flatten()
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-def validate_db_integrity(db):
-    """Check for physical corruption: NaN, wrong shape, missing keys."""
-    errors = []
-    for sid, data in db.items():
-        if not isinstance(data, dict):
-            errors.append(f"{sid}: not a dict")
-            continue
-        if "embeddings" not in data or "name" not in data:
-            errors.append(f"{sid}: missing required keys")
-            continue
-        for i, emb in enumerate(data["embeddings"]):
-            arr = np.array(emb)
-            if arr.shape != (512,):
-                errors.append(f"{sid}: emb[{i}] shape {arr.shape} != (512,)")
-            if np.isnan(arr).any() or np.isinf(arr).any():
-                errors.append(f"{sid}: emb[{i}] contains NaN/Inf")
-    return errors
+
 try:
     df = pd.read_excel(DATA_FILE)
     df.columns = df.columns.str.strip()
@@ -249,20 +123,6 @@ def db_health():
         "students": report
     }
 
-@app.get("/api/health")
-def health():
-    """Quick system health check for IT monitoring."""
-    errors = validate_db_integrity(global_face_db)
-    return {
-        "status": "ok" if len(errors) == 0 else "degraded",
-        "camera": "connected",
-        "db_students": len(global_face_db),
-        "db_corrupted": len(errors) > 0,
-        "db_errors": errors[:5],
-        "db_file_size_kb": round(os.path.getsize(MEMORY_FILE) / 1024, 1) if os.path.exists(MEMORY_FILE) else 0,
-        "session_active": session_stats["start_time"] is not None,
-        "total_embeddings": sum(len(v["embeddings"]) for v in global_face_db.values())
-    }
 
 @app.get("/api/session-report")
 def session_report():
@@ -301,7 +161,6 @@ class EnrollPayload(BaseModel):
     student_name: str
     class_nbr: str
     images: dict  
-
 
 @app.post("/api/enroll-face")
 def enroll_face(payload: EnrollPayload):
@@ -393,8 +252,7 @@ def recognize_face(emb):
 
 def process_frame(image_b64):
     global live_tracker_memory
-    t_start = time.time()
-
+    
     if not image_b64:
         return []
     if "," in image_b64:
@@ -410,7 +268,6 @@ def process_frame(image_b64):
 
     frame_bgr = np.array(img)[:, :, ::-1]
     
-        #
     results = yolo_person.track(
         frame_bgr,
         conf=0.45,
@@ -438,58 +295,16 @@ def process_frame(image_b64):
             track_id = int(track_id)
             
             if (x2 - x1) < 40 or (y2 - y1) < 40:
-             continue
+                continue
 
             person = live_tracker_memory.get(track_id, {
                 "student_id": None,
                 "name": "Scanning...",
                 "status": "scanning",
                 "frames_no_face": 0,
-                "last_seen": current_time,
-                "last_recognized": 0,
-                "last_processed": 0
+                "last_seen": current_time
             })
             person["last_seen"] = current_time
-
-            # 🚀 FAST PATH 1: Known student — skip recognition for 10 seconds
-            if (person.get("status") == "known" and 
-                (current_time - person.get("last_recognized", 0)) < 10.0):
-                current_frame_tracks[track_id] = person
-                faces_out.append({
-                    "box": [x1, y1, x2 - x1, y2 - y1],
-                    "track_id": track_id,
-                    "student_id": person["student_id"],
-                    "name": person["name"],
-                    "status": "known"
-                })
-                continue
-
-            # 🚀 FAST PATH 2: Unknown student — skip re-recognition for 2 seconds
-            # The box still tracks smoothly via YOLO; we just don't re-run MTCNN
-            if (person.get("status") == "unknown" and 
-                (current_time - person.get("last_processed", 0)) < 2.0):
-                current_frame_tracks[track_id] = person
-                faces_out.append({
-                    "box": [x1, y1, x2 - x1, y2 - y1],
-                    "track_id": track_id,
-                    "student_id": None,
-                    "name": "Unknown",
-                    "status": "unknown"
-                })
-                continue
-
-            # 🚀 FAST PATH 3: No face detected — don't hammer MTCNN, wait 1 second
-            if (person.get("status") == "no_face" and 
-                (current_time - person.get("last_processed", 0)) < 1.0):
-                current_frame_tracks[track_id] = person
-                faces_out.append({
-                    "box": [x1, y1, x2 - x1, y2 - y1],
-                    "track_id": track_id,
-                    "student_id": None,
-                    "name": "No Face",
-                    "status": "no_face"
-                })
-                continue
 
             head_h = int((y2 - y1) * 0.50)
             hx1 = max(0, x1 - 20)
@@ -566,19 +381,18 @@ def process_frame(image_b64):
                                 person["student_id"] = sid
                                 person["name"] = name
                                 person["status"] = "known"
-                                person["last_recognized"] = current_time
-                                
+
                                 existing = global_face_db[sid]["embeddings"]
                                 
-                                                                # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new
+                                # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new
                                 if (0.72 < score < 0.94 and 
-                                    probs_arr[best_idx] > 0.97 and   # ← Lowered from 0.99 to capture more angles
+                                    probs_arr[best_idx] > 0.99 and 
                                     len(existing) < 8):
                                     
                                     # Check if this angle/view is already represented
                                     if len(existing) > 0:
                                         sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing]
-                                        if max(sims_to_existing) > 0.85:  # ← Lowered from 0.88 to allow more diversity
+                                        if max(sims_to_existing) > 0.88:
                                             # Already have this angle, skip to prevent bloat
                                             pass
                                         else:
@@ -592,10 +406,6 @@ def process_frame(image_b64):
                                             if symmetry > 0.60:  # 🎯 Accept side profiles for classroom reality
                                                 existing.append(emb.tolist())
                                                 save_required = True
-                                                
-                                                # 🏆 BEST DB: Only save if truly excellent quality
-                                                if probs_arr[best_idx] > 0.99 and symmetry > 0.80:
-                                                    add_to_best_db(sid, name, emb, float(probs_arr[best_idx]), symmetry)
                                                 
                                                 session_stats["embeddings_added"][sid] = session_stats["embeddings_added"].get(sid, 0) + 1
                                                 session_stats["avg_symmetry"].append(symmetry)
@@ -622,7 +432,7 @@ def process_frame(image_b64):
                     person["student_id"] = None
                     person["name"] = "No Face"
                     person["status"] = "no_face"
-            person["last_processed"] = current_time
+
             current_frame_tracks[track_id] = person
 
             if person["status"] != "no_face":
@@ -655,9 +465,7 @@ def process_frame(image_b64):
     if current_time - process_frame._last_mem_report > 10:
         print(f"🧠 MEM-TRACK: {len(live_tracker_memory)} active tracks | DB: {len(global_face_db)} students")
         process_frame._last_mem_report = current_time
-    elapsed = (time.time() - t_start) * 1000
-    
-        
+
     return faces_out
 
 @app.websocket("/ws/surveillance")
@@ -665,7 +473,6 @@ async def ws_surveillance(ws: WebSocket):
     await ws.accept()
     global live_tracker_memory
     live_tracker_memory.clear()
-    
     try:
         while True:
             data = await ws.receive_json()
@@ -681,9 +488,8 @@ class AssignPayload(BaseModel):
     student_id: str
     student_name: str
     image: str
-    box: Optional[list] = None
-    is_manual: bool = False
-    
+    box: list
+
 @app.post("/api/assign-face")
 def assign_face(p: AssignPayload):
     if "," in p.image: p.image = p.image.split(",")[1]
@@ -693,26 +499,21 @@ def assign_face(p: AssignPayload):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image data.")
     
-    # 🎯 MANUAL ZOOM: image is already a magnified face crop
-    if p.is_manual or not p.box:
-        if max(img.size) > 1200:
-            img.thumbnail((800, 800))
-        head_crop = img
-    else:
-        # 🎯 YOLO TRACKING: existing body-box to head-crop logic
-        x, y, w, h = map(int, p.box)
-        head_h = int(h * 0.50)
-        hx1 = max(0, x - 20)
-        hy1 = max(0, y - 20)
-        hx2 = min(img.width, x + w + 20)
-        hy2 = min(img.height, y + head_h + 20)
-        
-        if hx2 <= hx1 or hy2 <= hy1:
-            raise HTTPException(status_code=400, detail="Invalid face region.")
-        
-        head_crop = img.crop((hx1, hy1, hx2, hy2))
+    x, y, w, h = map(int, p.box)
     
-    # --- MTCNN detection ---
+    # Head ROI (same logic as surveillance)
+    head_h = int(h * 0.50)
+    hx1 = max(0, x - 20)
+    hy1 = max(0, y - 20)
+    hx2 = min(img.width, x + w + 20)
+    hy2 = min(img.height, y + head_h + 20)
+    
+    if hx2 <= hx1 or hy2 <= hy1:
+        raise HTTPException(status_code=400, detail="Invalid face region.")
+    
+    head_crop = img.crop((hx1, hy1, hx2, hy2))
+    
+    # Robust detect + landmarks
     f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
     
     if f_boxes is None or len(f_boxes) == 0 or f_boxes[0] is None:
@@ -729,19 +530,10 @@ def assign_face(p: AssignPayload):
     landmarks_arr = np.array(landmarks_raw)
     if landmarks_arr.ndim == 2: landmarks_arr = landmarks_arr.reshape(1, 5, 2)
     
-        # 🛡️ MANUAL ZOOM: Reject if multiple faces in crop
-    if p.is_manual and len(boxes_arr) > 1:
-        high_conf_count = sum(1 for prob in probs_arr if prob > 0.90)
-        if high_conf_count > 1:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Multiple faces detected in zoom ({high_conf_count} found). Please zoom closer on one student only."
-            )
-    
     best_idx = int(np.argmax(probs_arr))
     
-    # 🚨 QUALITY GATES
-    if probs_arr[best_idx] < 0.95:
+    # 🚨 STRICT ENROLLMENT GATE
+    if probs_arr[best_idx] < 0.99:
         raise HTTPException(status_code=400, detail=f"Face too unclear ({probs_arr[best_idx]:.2f}). Ask student to look directly at camera.")
     
     # Frontal check
@@ -751,7 +543,7 @@ def assign_face(p: AssignPayload):
     dist_right = np.linalg.norm(nose - right_eye)
     symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
     
-    if symmetry < 0.70:
+    if symmetry < 0.80:
         raise HTTPException(status_code=400, detail=f"Face not frontal enough ({symmetry:.2f}). Ask student to face camera.")
     
     # Extract embedding
@@ -768,27 +560,15 @@ def assign_face(p: AssignPayload):
     if len(face_tensors) == 0:
         raise HTTPException(status_code=400, detail="Face extraction failed.")
     
-    # 🎯 THIS LINE MUST EXIST AND MUST COME BEFORE emb IS COMPUTED
     face_tensor = face_tensors[0]
     with torch.no_grad():
         emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
     
-    # 🛡️ IDENTITY CONSISTENCY: If student already enrolled, verify face matches them
-    if p.student_id in global_face_db and len(global_face_db[p.student_id]["embeddings"]) > 0:
-        existing_embs = global_face_db[p.student_id]["embeddings"]
-        sims_to_self = [cosine_similarity(emb.tolist(), e) for e in existing_embs]
-        max_self_sim = max(sims_to_self)
-        if max_self_sim < 0.55:
-            return {
-                "status": "error",
-                "message": f"🚫 IDENTITY MISMATCH: This face does not match existing biometric record for {global_face_db[p.student_id]['name']}. You may have selected the wrong student.",
-                "max_similarity_to_record": round(max_self_sim, 3)
-            }
-    
-    # 🛡️ DUPLICATE FACE CHECK: Does this face already belong to someone else?
+    # 🛡️ DUPLICATE FACE CHECK: Does this face already belong to someone?
     DUPLICATE_THRESHOLD = 0.75
     
     for existing_id, existing_data in global_face_db.items():
+        # Skip self — same student can get more angles
         if existing_id == p.student_id:
             continue
             
@@ -809,17 +589,6 @@ def assign_face(p: AssignPayload):
     
     existing = global_face_db[p.student_id]["embeddings"]
     
-        # 🎯 HARD CAP: Never exceed 8 embeddings per student
-    if len(existing) >= 8:
-        return {
-            "status": "success",
-            "message": f"{p.student_name} already has maximum biometric data (8 angles). No new data saved.",
-            "quality": "maxed",
-            "symmetry": round(symmetry, 3),
-            "confidence": round(float(probs_arr[best_idx]), 3),
-            "total_embeddings": len(existing)
-        }
-
     # 🎯 ENROLLMENT REDUNDANCY: Don't save near-duplicates for same student
     if len(existing) > 0:
         sims = [cosine_similarity(emb.tolist(), e) for e in existing]
@@ -832,13 +601,9 @@ def assign_face(p: AssignPayload):
                 "confidence": round(float(probs_arr[best_idx]), 3)
             }
     
-        # Save the high-quality seed
+    # Save the high-quality seed
     existing.append(emb.tolist())
     save_face_db(global_face_db)
-    
-    # 🏆 Save to BEST DB if this is truly excellent quality
-    if is_high_quality_embedding(float(probs_arr[best_idx]), symmetry):
-        add_to_best_db(p.student_id, p.student_name, emb, float(probs_arr[best_idx]), symmetry)
     
     # Clear tracker so next frame recognizes immediately
     global live_tracker_memory
@@ -846,34 +611,13 @@ def assign_face(p: AssignPayload):
     
     return {
         "status": "success",
-        "message": f"✅ {p.student_name} enrolled successfully.",
+        "message": f"✅ {p.student_name} enrolled with high-quality frontal embedding.",
         "quality": "excellent",
         "symmetry": round(symmetry, 3),
         "confidence": round(float(probs_arr[best_idx]), 3),
         "total_embeddings": len(existing)
     }
 
-
-
-class UnassignPayload(BaseModel):
-    student_id: str
-
-@app.post("/api/unassign-student")
-def unassign_student(p: UnassignPayload):
-    if p.student_id in global_face_db:
-        del global_face_db[p.student_id]
-        save_face_db(global_face_db)
-        print(f"🗑️ Removed student {p.student_id} from face DB")
-    
-    # Clear tracker so the face immediately becomes unknown again
-    global live_tracker_memory
-    live_tracker_memory.clear()
-    
-    return {
-        "status": "success", 
-        "message": f"Student unassigned. Biometric data removed.",
-        "student_id": p.student_id
-    }
 # =========================================================
 # EXCEL EXPORT (RESTORED)
 # =========================================================
