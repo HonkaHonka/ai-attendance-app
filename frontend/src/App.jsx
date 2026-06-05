@@ -57,7 +57,7 @@ function App() {
   const inspectCanvasRef = useRef(null); 
   const frameIntervalRef = useRef(null);
   const waitingForResponse = useRef(false);
-  const frameLoopRef = useRef(null);
+  
   
 
 
@@ -201,7 +201,7 @@ function App() {
       
       wsRef.current.onopen = () => {
         // 🎯 Old reliable interval, but guarded by waitingForResponse
-        frameIntervalRef.current = setInterval(sendFrameToWebSocket, 100);
+        frameIntervalRef.current = setInterval(sendFrameToWebSocket, 200);
       };
       
       wsRef.current.onmessage = (event) => {

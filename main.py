@@ -31,6 +31,14 @@ print(f"✅ RUNNING ON {device}")
 
 print("🔹 Loading YOLOv8n (PERSON TRACKING)...")
 yolo_person = YOLO("yolov8n_openvino_model/", task="detect") 
+try:
+    # Access the OpenVINO compiled model properties
+    ov_model = yolo_person.predictor.model.ov_compiled_model
+    device_name = ov_model.get_property("DEVICE_NAME")
+    print(f"🔥 YOLO OpenVINO Device: {device_name}")
+except Exception as e:
+    print(f"⚠️ Could not detect OpenVINO device property: {e}")
+
 print(f"🔥 YOLO device: {yolo_person.device if hasattr(yolo_person, 'device') else 'unknown'}")
 
 print("🔹 Loading Face Quality Gate (MTCNN)...")
@@ -378,7 +386,7 @@ def recognize_face(emb):
 
 def process_frame(image_b64):
     global live_tracker_memory
-    print(f"📥 Frame received, tracker memory size: {len(live_tracker_memory)}")
+    
     if not image_b64:
         return []
     if "," in image_b64:
@@ -394,15 +402,31 @@ def process_frame(image_b64):
 
     frame_bgr = np.array(img)[:, :, ::-1]
     
-    results = yolo_person.track(
-        frame_bgr,
-        conf=0.45,
-        iou=0.40,
-        classes=[0],
-        tracker="botsort.yaml",
-        persist=True,
-        verbose=False
-    )
+        # 🎯 Force OpenVINO to use Intel Iris Xe GPU
+    # If GPU fails (driver issue), it falls back to CPU automatically
+    try:
+        results = yolo_person.track(
+            frame_bgr,
+            conf=0.45,
+            iou=0.40,
+            classes=[0],
+            tracker="botsort.yaml",
+            persist=True,
+            verbose=False,
+            device="GPU"
+        )
+    except Exception as gpu_err:
+        print(f"⚠️ GPU inference failed: {gpu_err}. Falling back to CPU.")
+        results = yolo_person.track(
+            frame_bgr,
+            conf=0.45,
+            iou=0.40,
+            classes=[0],
+            tracker="botsort.yaml",
+            persist=True,
+            verbose=False,
+            device="CPU"
+        )
     
     faces_out = []
     current_frame_tracks = {}
