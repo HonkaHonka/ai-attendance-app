@@ -410,31 +410,16 @@ def process_frame(image_b64):
 
     frame_bgr = np.array(img)[:, :, ::-1]
     
-        # 🎯 Force OpenVINO to use Intel Iris Xe GPU
-    # If GPU fails (driver issue), it falls back to CPU automatically
-    try:
-        results = yolo_person.track(
-            frame_bgr,
-            conf=0.45,
-            iou=0.40,
-            classes=[0],
-            tracker="botsort.yaml",
-            persist=True,
-            verbose=False,
-            device="GPU"
-        )
-    except Exception as gpu_err:
-        print(f"⚠️ GPU inference failed: {gpu_err}. Falling back to CPU.")
-        results = yolo_person.track(
-            frame_bgr,
-            conf=0.45,
-            iou=0.40,
-            classes=[0],
-            tracker="botsort.yaml",
-            persist=True,
-            verbose=False,
-            device="CPU"
-        )
+        #
+    results = yolo_person.track(
+        frame_bgr,
+        conf=0.45,
+        iou=0.40,
+        classes=[0],
+        tracker="botsort.yaml",
+        persist=True,
+        verbose=False
+    )
     
     faces_out = []
     current_frame_tracks = {}
