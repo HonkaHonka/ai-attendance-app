@@ -1,5 +1,17 @@
 import os
-os.environ["OPENVINO_DEVICE"] = "GPU"  # Force OpenVINO AUTO to prefer GPU
+os.environ["OPENVINO_DEVICE"] = "GPU"
+
+# 🎯 MONKEY-PATCH: Intercept OpenVINO compile_model and force GPU
+import openvino as ov
+_original_compile_model = ov.Core.compile_model
+
+def _patched_compile_model(self, model, device_name=None, config=None):
+    if device_name in ("AUTO", "AUTO:CPU,GPU", "AUTO:GPU,CPU", None, "CPU"):
+        print(f"🔄 OpenVINO device override: {device_name} → GPU")
+        device_name = "GPU"
+    return _original_compile_model(self, model, device_name, config)
+
+ov.Core.compile_model = _patched_compile_model
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
