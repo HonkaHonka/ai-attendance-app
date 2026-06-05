@@ -605,7 +605,7 @@ def process_frame(image_b64):
                     person["student_id"] = None
                     person["name"] = "No Face"
                     person["status"] = "no_face"
-
+            person["last_processed"] = current_time
             current_frame_tracks[track_id] = person
 
             if person["status"] != "no_face":
