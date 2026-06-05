@@ -1,11 +1,11 @@
-# save as check_ov.py
-import openvino
-print("OpenVINO version:", openvino.__version__)
+from openvino.runtime import Core
 
-from openvino import Core
 core = Core()
 devices = core.available_devices
-print("Devices:", devices)
+print("OpenVINO available devices:", devices)
 
-for d in devices:
-    print(f"  {d}")
+if 'GPU' in devices or 'GPU.0' in devices:
+    print("✅ Intel GPU is visible to OpenVINO")
+else:
+    print("❌ Intel GPU is NOT visible to OpenVINO")
+    print("The TV is missing Intel GPU drivers or the OpenVINO GPU plugin.")555
