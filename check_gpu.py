@@ -1,11 +1,11 @@
-from openvino.runtime import Core
-
+from openvino import Core
 core = Core()
-devices = core.available_devices
-print("OpenVINO available devices:", devices)
+print("Devices:", core.available_devices)
 
-if 'GPU' in devices or 'GPU.0' in devices:
-    print("✅ Intel GPU is visible to OpenVINO")
-else:
-    print("❌ Intel GPU is NOT visible to OpenVINO")
-    print("The TV is missing Intel GPU drivers or the OpenVINO GPU plugin.")555
+model = core.read_model("D:/ai-attendance-app/yolov8n_openvino_model/yolov8n.xml")
+try:
+    compiled = core.compile_model(model, "GPU")
+    print("✅ GPU compilation works! Model runs on Intel Iris Xe.")
+except Exception as e:
+    print(f"❌ GPU compilation failed: {e}")
+    print("Driver issue — GPU visible but cannot compile.")
