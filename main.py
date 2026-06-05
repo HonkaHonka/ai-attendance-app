@@ -378,7 +378,7 @@ def recognize_face(emb):
 
 def process_frame(image_b64):
     global live_tracker_memory
-    
+    print(f"📥 Frame received, tracker memory size: {len(live_tracker_memory)}")
     if not image_b64:
         return []
     if "," in image_b64:
@@ -396,8 +396,8 @@ def process_frame(image_b64):
     
     results = yolo_person.track(
         frame_bgr,
-        conf=0.60,      # ← Raised from 0.45
-        iou=0.50,       # ← Raised from 0.40 (less overlapping boxes)
+        conf=0.45,
+        iou=0.40,
         classes=[0],
         tracker="botsort.yaml",
         persist=True,

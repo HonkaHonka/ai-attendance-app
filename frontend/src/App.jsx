@@ -58,7 +58,7 @@ function App() {
   const frameIntervalRef = useRef(null);
   const waitingForResponse = useRef(false);
   const frameLoopRef = useRef(null);
-  const surveillanceActiveRef = useRef(false);
+  
 
 
   const getCanvasContentBounds = (canvas) => {
@@ -169,10 +169,14 @@ function App() {
     // ==========================================
   // WEBSOCKET & SURVEILLANCE — ACK-BASED PACING
   // ==========================================
-    const sendFrameToWebSocket = () => {
+      // ==========================================
+  // WEBSOCKET & SURVEILLANCE — RELIABLE INTERVAL + ACK GUARD
+  // ==========================================
+  const sendFrameToWebSocket = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !waitingForResponse.current) {
       const video = surveillanceWebcamRef.current?.video;
-      if (video && video.readyState >= 2 && video.videoWidth > 0) {
+      // 🎯 Use original check: videoWidth > 0 (readyState >= 2 blocks too early)
+      if (video && video.videoWidth > 0) {
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = AI_W;
         tempCanvas.height = AI_H;
@@ -186,25 +190,18 @@ function App() {
     }
   };
 
-  const runFrameLoop = () => {
-    if (surveillanceActiveRef.current) {   // ← USE REF, NOT STATE
-      sendFrameToWebSocket();
-    }
-    frameLoopRef.current = requestAnimationFrame(runFrameLoop);
-  };
-
-    const toggleSurveillance = () => {
+  const toggleSurveillance = () => {
     if (isSurveillanceActive) {
       stopSurveillance();
     } else {
       setIsSurveillanceActive(true);
-      surveillanceActiveRef.current = true;   // ← REAL-TIME LOOP FLAG
       waitingForResponse.current = false;
       
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
       
       wsRef.current.onopen = () => {
-        frameLoopRef.current = requestAnimationFrame(runFrameLoop);
+        // 🎯 Old reliable interval, but guarded by waitingForResponse
+        frameIntervalRef.current = setInterval(sendFrameToWebSocket, 100);
       };
       
       wsRef.current.onmessage = (event) => {
@@ -229,10 +226,9 @@ function App() {
 
   const stopSurveillance = () => {
     setIsSurveillanceActive(false);
-    surveillanceActiveRef.current = false;   // ← STOP THE LOOP
-    if (frameLoopRef.current) {
-      cancelAnimationFrame(frameLoopRef.current);
-      frameLoopRef.current = null;
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
     }
     if (wsRef.current) { 
       wsRef.current.close(); 
