@@ -671,8 +671,8 @@ def process_frame(image_b64):
         print(f"🧠 MEM-TRACK: {len(live_tracker_memory)} active tracks | DB: {len(global_face_db)} students")
         process_frame._last_mem_report = current_time
     elapsed = (time.time() - t_start) * 1000
-    if elapsed > 50:  # Only print slow frames
-        print(f"⏱️ Frame processed in {elapsed:.1f}ms")
+    
+        
     return faces_out
 
 @app.websocket("/ws/surveillance")
