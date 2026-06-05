@@ -202,6 +202,9 @@ function App() {
   // ==========================================
   // CANVAS OVERLAY DRAWING
   // ==========================================
+    // ==========================================
+  // CANVAS OVERLAY DRAWING — HEAD LEVEL ONLY
+  // ==========================================
   useEffect(() => {
     if (canvasRef.current && detectedFaces) {
       const canvas = canvasRef.current;
@@ -209,26 +212,77 @@ function App() {
       ctx.clearRect(0, 0, AI_W, AI_H);
 
       detectedFaces.forEach(face => {
-        const [x, y, w, h] = face.box;
+        // Use head_box from backend, or estimate from body box
+        let hx, hy, hw, hh;
+        if (face.head_box) {
+          [hx, hy, hw, hh] = face.head_box;
+        } else {
+          const [x, y, w, h] = face.box;
+          hw = w * 0.30;
+          hh = h * 0.22;
+          hx = x + (w - hw) / 2;
+          hy = y - hh * 0.2;
+          if (hy < 0) hy = 0;
+        }
 
+        // Draw small head rectangle
         ctx.beginPath();
-        ctx.lineWidth = 4;
-        if (face.status === 'known') { ctx.strokeStyle = '#28a745'; ctx.fillStyle = '#28a745'; } 
-        else if (face.status === 'scanning') { ctx.strokeStyle = '#ffcb05'; ctx.fillStyle = '#ffcb05'; }
-        else { ctx.strokeStyle = '#dc3545'; ctx.fillStyle = '#dc3545'; }
-        
-        ctx.rect(x, y, w, h);
+        ctx.lineWidth = 3;
+        if (face.status === 'known') { 
+          ctx.strokeStyle = '#28a745'; 
+        } else if (face.status === 'scanning') { 
+          ctx.strokeStyle = '#ffcb05'; 
+        } else if (face.status === 'occluded') {
+          ctx.strokeStyle = '#ff9800';
+        } else { 
+          ctx.strokeStyle = '#dc3545'; 
+        }
+        ctx.rect(hx, hy, hw, hh);
         ctx.stroke();
 
-        ctx.font = 'bold 24px Arial';
-        const text = face.name;
-        const textWidth = ctx.measureText(text).width;
-        ctx.fillRect(x, y - 35, textWidth + 20, 35);
-        ctx.fillStyle = '#fff';
-        ctx.fillText(text, x + 10, y - 8);
+        // Game-style name tag above head
+        if (face.name && face.name !== "Scanning..." && face.name !== "No Face" && face.name !== "Occluded") {
+          ctx.font = 'bold 16px Arial';
+          const text = face.name;
+          const textWidth = ctx.measureText(text).width;
+          const padding = 10;
+          const tagWidth = textWidth + padding * 2;
+          const tagHeight = 24;
+          const tagX = hx + hw/2 - tagWidth/2;
+          const tagY = hy - tagHeight - 8;
+
+          // Tag background
+          ctx.fillStyle = face.status === 'known' ? 'rgba(40, 167, 69, 0.95)' : 'rgba(220, 53, 69, 0.95)';
+          ctx.fillRect(tagX, tagY, tagWidth, tagHeight);
+          
+          // Text
+          ctx.fillStyle = '#fff';
+          ctx.textAlign = 'center';
+          ctx.fillText(text, hx + hw/2, tagY + 17);
+          ctx.textAlign = 'left';
+        } 
+        else if (face.status === 'scanning') {
+          // Pulsing "?" indicator
+          ctx.fillStyle = '#ffcb05';
+          ctx.beginPath();
+          ctx.arc(hx + hw/2, hy - 12, 10, 0, 2 * Math.PI);
+          ctx.fill();
+          ctx.fillStyle = '#000';
+          ctx.font = 'bold 14px Arial';
+          ctx.textAlign = 'center';
+          ctx.fillText('?', hx + hw/2, hy - 7);
+          ctx.textAlign = 'left';
+        }
+        else if (face.status === 'occluded') {
+          ctx.fillStyle = '#ff9800';
+          ctx.font = 'bold 12px Arial';
+          ctx.textAlign = 'center';
+          ctx.fillText('⚠ Occluded', hx + hw/2, hy - 8);
+          ctx.textAlign = 'left';
+        }
       });
     }
-  },[detectedFaces]);
+  }, [detectedFaces]);
 
   // ==========================================
   // INSPECT CANVAS RENDERER (right-click zoom)
@@ -389,7 +443,7 @@ function App() {
   // ==========================================
   // MOUSE HANDLERS
   // ==========================================
-    const handleCanvasClick = (e) => {
+      const handleCanvasClick = (e) => {
     if (e.button !== 0) return;
 
     const canvas = canvasRef.current;
@@ -403,18 +457,22 @@ function App() {
     const clickY = (e.clientY - rect.top) * scaleY;
 
     detectedFaces.forEach(face => {
-      const [x, y, w, h] = face.box;
+      // Use head_box for click detection (more precise)
+      const box = face.head_box || face.box;
+      const [x, y, w, h] = box;
       
       if (clickX >= x && clickX <= x + w && clickY >= y && clickY <= y + h) {
         
-        // 🔄 UPDATE MODE: Click on known student to unassign
-        if (isUpdateMode && face.status === 'known' && face.student_id) {
-          unassignStudent(face.student_id, face.name);
+        // 🟢 KNOWN FACE: Click to unassign (no update button needed)
+        if (face.status === 'known' && face.student_id) {
+          if (window.confirm(`Unassign ${face.name}?\n\nThis will remove their biometric data so you can reassign correctly. Other students stay untouched.`)) {
+            unassignStudent(face.student_id, face.name);
+          }
           return;
         }
         
-                // Normal assign behavior for unknown/scanning/known
-        if ((face.status === 'unknown' || face.status === 'scanning' || face.status === 'known')) {
+        // 🔴 UNKNOWN/SCANNING: Click to assign
+        if (face.status === 'unknown' || face.status === 'scanning' || face.status === 'no_face') {
           const video = surveillanceWebcamRef.current?.video;
           if (!video || video.readyState < 2) return;
           
