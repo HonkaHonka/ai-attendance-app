@@ -56,7 +56,8 @@ function App() {
   const surveillanceWebcamRef = useRef(null); 
   const inspectCanvasRef = useRef(null); 
   const frameIntervalRef = useRef(null);
-
+  const waitingForResponse = useRef(false);
+  const frameLoopRef = useRef(null);
 
   const getCanvasContentBounds = (canvas) => {
     const rect = canvas.getBoundingClientRect();
@@ -163,19 +164,31 @@ function App() {
   // ==========================================
   // WEBSOCKET & SURVEILLANCE
   // ==========================================
+    // ==========================================
+  // WEBSOCKET & SURVEILLANCE — ACK-BASED PACING
+  // ==========================================
   const sendFrameToWebSocket = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && surveillanceWebcamRef.current && surveillanceWebcamRef.current.video) {
-      const video = surveillanceWebcamRef.current.video;
-      if (video.videoWidth > 0) {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !waitingForResponse.current) {
+      const video = surveillanceWebcamRef.current?.video;
+      if (video && video.readyState >= 2 && video.videoWidth > 0) {
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = AI_W;
         tempCanvas.height = AI_H;
         const ctx = tempCanvas.getContext('2d');
         ctx.drawImage(video, 0, 0, AI_W, AI_H);
-        const imageSrc = tempCanvas.toDataURL('image/jpeg', 0.6); 
+        const imageSrc = tempCanvas.toDataURL('image/jpeg', 0.6);
+        
+        waitingForResponse.current = true;
         wsRef.current.send(JSON.stringify({ image: imageSrc }));
       }
     }
+  };
+
+  const runFrameLoop = () => {
+    if (isSurveillanceActive) {
+      sendFrameToWebSocket();
+    }
+    frameLoopRef.current = requestAnimationFrame(runFrameLoop);
   };
 
   const toggleSurveillance = () => {
@@ -183,36 +196,47 @@ function App() {
       stopSurveillance();
     } else {
       setIsSurveillanceActive(true);
+      waitingForResponse.current = false;
+      
       wsRef.current = new WebSocket(`${WS_BASE}/surveillance`);
-      wsRef.current.onopen = () => { 
-        // 🎯 5 FPS throttle — send every 200ms instead of 60 FPS
-                frameIntervalRef.current = setInterval(sendFrameToWebSocket, 100);
+      
+      wsRef.current.onopen = () => {
+        // Start the loop — it will naturally pace itself to backend speed
+        frameLoopRef.current = requestAnimationFrame(runFrameLoop);
       };
+      
       wsRef.current.onmessage = (event) => {
+        // 🎯 CRITICAL: Allow next frame to send immediately
+        waitingForResponse.current = false;
+        
         const data = JSON.parse(event.data);
         if (data.faces) {
           setDetectedFaces(data.faces);
           const newRecords = {};
           data.faces.forEach(face => {
-            if (face.status === 'known' && face.student_id) newRecords[face.student_id] = 'present';
+            if (face.status === 'known' && face.student_id) {
+              newRecords[face.student_id] = 'present';
+            }
           });
           setAttendanceRecords(prev => ({ ...prev, ...newRecords }));
         }
       };
+      
       wsRef.current.onerror = () => { stopSurveillance(); };
     }
   };
 
   const stopSurveillance = () => {
     setIsSurveillanceActive(false);
-    if (frameIntervalRef.current) {
-      clearInterval(frameIntervalRef.current);
-      frameIntervalRef.current = null;
+    if (frameLoopRef.current) {
+      cancelAnimationFrame(frameLoopRef.current);
+      frameLoopRef.current = null;
     }
     if (wsRef.current) { 
       wsRef.current.close(); 
       wsRef.current = null; 
     }
+    waitingForResponse.current = false;
     setDetectedFaces([]);
     setLiveZoom(null);
     setQuickEnrollData(null);

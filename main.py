@@ -428,12 +428,15 @@ def process_frame(image_b64):
                 "name": "Scanning...",
                 "status": "scanning",
                 "frames_no_face": 0,
-                "last_seen": current_time
+                "last_seen": current_time,
+                "last_recognized": 0,
+                "last_processed": 0
             })
             person["last_seen"] = current_time
 
-                        # 🎯 PERFORMANCE: Skip expensive face extraction if recently recognized
-            if person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 7.0:
+            # 🚀 FAST PATH 1: Known student — skip recognition for 10 seconds
+            if (person.get("status") == "known" and 
+                (current_time - person.get("last_recognized", 0)) < 10.0):
                 current_frame_tracks[track_id] = person
                 faces_out.append({
                     "box": [x1, y1, x2 - x1, y2 - y1],
@@ -441,6 +444,33 @@ def process_frame(image_b64):
                     "student_id": person["student_id"],
                     "name": person["name"],
                     "status": "known"
+                })
+                continue
+
+            # 🚀 FAST PATH 2: Unknown student — skip re-recognition for 2 seconds
+            # The box still tracks smoothly via YOLO; we just don't re-run MTCNN
+            if (person.get("status") == "unknown" and 
+                (current_time - person.get("last_processed", 0)) < 2.0):
+                current_frame_tracks[track_id] = person
+                faces_out.append({
+                    "box": [x1, y1, x2 - x1, y2 - y1],
+                    "track_id": track_id,
+                    "student_id": None,
+                    "name": "Unknown",
+                    "status": "unknown"
+                })
+                continue
+
+            # 🚀 FAST PATH 3: No face detected — don't hammer MTCNN, wait 1 second
+            if (person.get("status") == "no_face" and 
+                (current_time - person.get("last_processed", 0)) < 1.0):
+                current_frame_tracks[track_id] = person
+                faces_out.append({
+                    "box": [x1, y1, x2 - x1, y2 - y1],
+                    "track_id": track_id,
+                    "student_id": None,
+                    "name": "No Face",
+                    "status": "no_face"
                 })
                 continue
 
@@ -617,23 +647,11 @@ async def ws_surveillance(ws: WebSocket):
     global live_tracker_memory
     live_tracker_memory.clear()
     
-    is_processing = False  # 🎯 Frame dropping flag
-    
     try:
         while True:
             data = await ws.receive_json()
-            
-            # If backend is still busy, drop this frame and wait for the next one
-            if is_processing:
-                continue
-            
-            is_processing = True
-            try:
-                faces = await asyncio.to_thread(process_frame, data["image"])
-                await ws.send_json({"status": "success", "faces": faces})
-            finally:
-                is_processing = False
-                
+            faces = await asyncio.to_thread(process_frame, data["image"])
+            await ws.send_json({"status": "success", "faces": faces})
     except WebSocketDisconnect:
         live_tracker_memory.clear()
 
