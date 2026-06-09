@@ -1,6 +1,17 @@
 import os
 os.environ["OPENVINO_DEVICE"] = "GPU"
 
+# 🎯 MONKEY-PATCH: Intercept OpenVINO compile_model and force GPU
+import openvino as ov
+_original_compile_model = ov.Core.compile_model
+
+def _patched_compile_model(self, model, device_name=None, config=None):
+    if device_name in ("AUTO", "AUTO:CPU,GPU", "AUTO:GPU,CPU", None, "CPU"):
+        print(f"🔄 OpenVINO device override: {device_name} → GPU")
+        device_name = "GPU"
+    return _original_compile_model(self, model, device_name, config)
+
+ov.Core.compile_model = _patched_compile_model
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import pandas as pd
 import uvicorn
+import os
 import base64
 import numpy as np
 import pickle
@@ -21,8 +33,7 @@ from typing import Dict
 import time
 import shutil
 from typing import Optional
-import traceback
-import atexit
+
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -32,22 +43,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 device = torch.device("cpu")
 print(f"✅ RUNNING ON {device}")
 
-print("🔹 Loading YOLOv8n (PyTorch CPU — stable tracking)...")
-# 🎯 PyTorch model on CPU. 640px is fast enough for smooth 5 FPS tracking.
-yolo_person = YOLO("yolov8n.pt")
-dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
-_ = yolo_person.track(dummy_frame, verbose=False, persist=True, device="cpu", imgsz=640)
-print("✅ YOLO loaded on CPU")
+print("🔹 Loading YOLOv8n (PERSON TRACKING)...")
+yolo_person = YOLO("yolov8n_openvino_model/", task="detect")
+
+# 🎯 Warmup: forces predictor initialization so first real frame is fast
+dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+_ = yolo_person.track(dummy_frame, verbose=False, persist=True)
+print("✅ YOLO OpenVINO model loaded")
 
 print("🔹 Loading Face Quality Gate (MTCNN)...")
 mtcnn = MTCNN(keep_all=False, device=device)
 
-print("🔹 Loading Face Embedding Model (OpenVINO GPU)...")
-from openvino import Core
-face_net_core = Core()
-face_net_ov = face_net_core.compile_model("facenet_openvino.xml", "GPU")
-face_net_output = face_net_ov.output(0)
-print("✅ FaceNet loaded on Intel GPU")
+print("🔹 Loading Face Embedding Model...")
+face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -310,9 +318,8 @@ def enroll_face(payload: EnrollPayload):
                 
                 face_tensor = mtcnn(img)
                 if face_tensor is not None:
-                    # OpenVINO GPU inference: numpy input, no torch overhead
-                    face_np = face_tensor.unsqueeze(0).numpy()  # [1, 3, 160, 160]
-                    emb = face_net_ov(face_np)[face_net_output][0]  # 512-D vector
+                    with torch.no_grad():
+                        emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
                     student_embeddings.append(emb.tolist())
             except Exception: pass
             
@@ -334,12 +341,9 @@ def verify_face(payload: VerifyPayload):
         
         face_tensor = mtcnn(img)
         if face_tensor is None: raise ValueError("No face detected")
-        
-        # OpenVINO GPU inference (matches your new setup)
-        face_np = face_tensor.unsqueeze(0).numpy()
-        live_embedding = face_net_ov(face_np)[face_net_output][0]
-    except Exception: 
-        raise HTTPException(status_code=400, detail="No face detected in the camera.")
+        with torch.no_grad():
+            live_embedding = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+    except Exception: raise HTTPException(status_code=400, detail="No face detected in the camera.")
 
     best_match_name = "Unknown"
     best_match_score = -1.0 
@@ -390,30 +394,6 @@ def recognize_face(emb):
     return None, "Unknown", best_score
 
 
-DEBUG_LOG = open("debug_crash.log", "w", buffering=1)  # line-buffered
-
-def log(msg):
-    ts = time.strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}\n"
-    DEBUG_LOG.write(line)
-    DEBUG_LOG.flush()
-    print(line.strip())
-
-def safe_process_frame(image_b64):
-    try:
-        log("=== FRAME START ===")
-        result = _real_process_frame(image_b64)
-        log(f"=== FRAME END: {len(result)} faces ===")
-        return result
-    except Exception as e:
-        log(f"!!! PYTHON EXCEPTION: {e}")
-        log(traceback.format_exc())
-        raise
-    finally:
-        pass
-
-
-
 def process_frame(image_b64):
     global live_tracker_memory
     t_start = time.time()
@@ -441,13 +421,8 @@ def process_frame(image_b64):
         classes=[0],
         tracker="botsort.yaml",
         persist=True,
-        verbose=False,
-        device="cpu",
-        imgsz=640
+        verbose=False
     )
-    print(f"🐛 YOLO raw: {len(results)} results, boxes={results[0].boxes is not None if results else 'N/A'}, ids={results[0].boxes.id is not None if (results and results[0].boxes is not None) else 'N/A'}")
-
-
     
     faces_out = []
     current_frame_tracks = {}
@@ -585,9 +560,8 @@ def process_frame(image_b64):
                         if len(face_tensors) > 0:
                             face_tensor = face_tensors[0]
                             
-                                                        # OpenVINO GPU inference: numpy input, no torch overhead
-                            face_np = face_tensor.unsqueeze(0).numpy()  # [1, 3, 160, 160]
-                            emb = face_net_ov(face_np)[face_net_output][0]  # 512-D vector
+                            with torch.no_grad():
+                                emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
                             
                             sid, name, score = recognize_face(emb)
 
@@ -799,8 +773,8 @@ def assign_face(p: AssignPayload):
     
     # 🎯 THIS LINE MUST EXIST AND MUST COME BEFORE emb IS COMPUTED
     face_tensor = face_tensors[0]
-    face_np = face_tensor.unsqueeze(0).numpy()
-    emb = face_net_ov(face_np)[face_net_output][0]
+    with torch.no_grad():
+        emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
     
     # 🛡️ IDENTITY CONSISTENCY: If student already enrolled, verify face matches them
     if p.student_id in global_face_db and len(global_face_db[p.student_id]["embeddings"]) > 0:
