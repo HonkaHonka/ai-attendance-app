@@ -21,7 +21,8 @@ from typing import Dict
 import time
 import shutil
 from typing import Optional
-
+import traceback
+import atexit
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -387,6 +388,30 @@ def recognize_face(emb):
     if best_score >= MATCH_THRESHOLD:
         return best_id, best_name, best_score
     return None, "Unknown", best_score
+
+
+DEBUG_LOG = open("debug_crash.log", "w", buffering=1)  # line-buffered
+
+def log(msg):
+    ts = time.strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}\n"
+    DEBUG_LOG.write(line)
+    DEBUG_LOG.flush()
+    print(line.strip())
+
+def safe_process_frame(image_b64):
+    try:
+        log("=== FRAME START ===")
+        result = _real_process_frame(image_b64)
+        log(f"=== FRAME END: {len(result)} faces ===")
+        return result
+    except Exception as e:
+        log(f"!!! PYTHON EXCEPTION: {e}")
+        log(traceback.format_exc())
+        raise
+    finally:
+        pass
+
 
 
 def process_frame(image_b64):
