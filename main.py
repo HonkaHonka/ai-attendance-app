@@ -28,7 +28,8 @@ from PIL import Image
 import io
 import asyncio
 from ultralytics import YOLO
-from facenet_pytorch import MTCNN, InceptionResnetV1
+from facenet_pytorch import InceptionResnetV1
+import cv2
 from typing import Dict
 import time
 import shutil
@@ -51,8 +52,76 @@ dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
 _ = yolo_person.track(dummy_frame, verbose=False, persist=True)
 print("✅ YOLO OpenVINO model loaded")
 
-print("🔹 Loading Face Quality Gate (MTCNN)...")
-mtcnn = MTCNN(keep_all=False, device=device)
+print("🔹 Loading Face Quality Gate (YuNet)...")
+
+class YuNetMTCNNWrapper:
+    def __init__(self, model_path="face_detection_yunet_2023mar.onnx"):
+        self.detector = cv2.FaceDetectorYN.create(
+            model=model_path,
+            config="",
+            input_size=(320, 320),
+            score_threshold=0.75,
+            nms_threshold=0.3,
+            top_k=1
+        )
+    
+    def detect(self, img, landmarks=False):
+        arr = np.array(img)
+        h, w = arr.shape[:2]
+        self.detector.setInputSize((w, h))
+        _, faces = self.detector.detect(arr)
+        
+        if faces is None or len(faces) == 0:
+            return None, None, None
+        
+        boxes, probs, lms = [], [], []
+        for f in faces:
+            boxes.append([f[0], f[1], f[2], f[3]])
+            probs.append(float(f[14]))
+            lms.append([
+                [f[4], f[5]],   # right eye
+                [f[6], f[7]],   # left eye
+                [f[8], f[9]],   # nose
+                [f[10], f[11]], # right mouth
+                [f[12], f[13]]  # left mouth
+            ])
+        
+        # Return in MTCNN format: list of np arrays so f_boxes[0] works in your code
+        return [np.array(boxes)], [np.array(probs)], [np.array(lms)]
+    
+    def extract(self, img, boxes, save_path=None):
+        if boxes is None or len(boxes) == 0:
+            return None
+        
+        tensors = []
+        for box in boxes:
+            x, y, w, h = map(float, box)
+            margin = 0.2
+            x1 = max(0, int(x - w * margin))
+            y1 = max(0, int(y - h * margin))
+            x2 = min(img.width, int(x + w * (1 + margin)))
+            y2 = min(img.height, int(y + h * (1 + margin)))
+            
+            face = img.crop((x1, y1, x2, y2))
+            face = face.resize((160, 160))
+            arr = np.array(face).astype(np.float32) / 255.0
+            tensor = torch.from_numpy(arr).permute(2, 0, 1)
+            tensor = (tensor - 0.5) / 0.5   # normalize to [-1, 1] like MTCNN
+            tensors.append(tensor)
+        
+        if len(tensors) == 1:
+            return tensors[0]
+        return tensors
+    
+    def __call__(self, img):
+        # Used by enroll_face & verify_face
+        boxes, probs, lms = self.detect(img, landmarks=True)
+        if boxes is None or boxes[0] is None or len(boxes[0]) == 0:
+            return None
+        return self.extract(img, boxes[0][:1])
+
+mtcnn = YuNetMTCNNWrapper("face_detection_yunet_2023mar.onnx")
+print("✅ YuNet face detector loaded")
 
 print("🔹 Loading Face Embedding Model...")
 face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
@@ -80,7 +149,7 @@ def save_best_db(db):
     print(f"🏆 BEST DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
 
 def is_high_quality_embedding(prob, symmetry):
-    return prob > 0.99 and symmetry > 0.80
+    return prob > 0.90 and symmetry > 0.80
 
 def add_to_best_db(student_id, student_name, emb, prob, symmetry):
     if student_id not in global_best_db:
@@ -532,7 +601,7 @@ def process_frame(image_b64):
                 if len(boxes_arr) > 0:
                     best_idx = int(np.argmax(probs_arr))
                     
-                    if probs_arr[best_idx] > 0.90:
+                    if probs_arr[best_idx] > 0.80:
                         face_found = True
                         
                         # 🎯 ABSOLUTE FACE BOX for frontend zoom centering
@@ -575,7 +644,7 @@ def process_frame(image_b64):
                                 
                                                                 # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new
                                 if (0.72 < score < 0.94 and 
-                                    probs_arr[best_idx] > 0.97 and   # ← Lowered from 0.99 to capture more angles
+                                    probs_arr[best_idx] > 0.85 and   # ← Lowered from 0.99 to capture more angles
                                     len(existing) < 8):
                                     
                                     # Check if this angle/view is already represented
@@ -597,7 +666,7 @@ def process_frame(image_b64):
                                                 save_required = True
                                                 
                                                 # 🏆 BEST DB: Only save if truly excellent quality
-                                                if probs_arr[best_idx] > 0.99 and symmetry > 0.80:
+                                                if probs_arr[best_idx] > 0.90 and symmetry > 0.80:
                                                     add_to_best_db(sid, name, emb, float(probs_arr[best_idx]), symmetry)
                                                 
                                                 session_stats["embeddings_added"][sid] = session_stats["embeddings_added"].get(sid, 0) + 1
@@ -744,7 +813,7 @@ def assign_face(p: AssignPayload):
     best_idx = int(np.argmax(probs_arr))
     
     # 🚨 QUALITY GATES
-    if probs_arr[best_idx] < 0.95:
+    if probs_arr[best_idx] < 0.80:
         raise HTTPException(status_code=400, detail=f"Face too unclear ({probs_arr[best_idx]:.2f}). Ask student to look directly at camera.")
     
     # Frontal check
