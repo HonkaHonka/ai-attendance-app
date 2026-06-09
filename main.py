@@ -54,8 +54,12 @@ print("✅ YOLO OpenVINO model loaded")
 print("🔹 Loading Face Quality Gate (MTCNN)...")
 mtcnn = MTCNN(keep_all=False, device=device)
 
-print("🔹 Loading Face Embedding Model...")
-face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
+print("🔹 Loading Face Embedding Model (OpenVINO GPU)...")
+from openvino import Core
+face_net_core = Core()
+face_net_ov = face_net_core.compile_model("facenet_openvino.xml", "GPU")
+face_net_output = face_net_ov.output(0)
+print("✅ FaceNet loaded on Intel GPU")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -318,8 +322,9 @@ def enroll_face(payload: EnrollPayload):
                 
                 face_tensor = mtcnn(img)
                 if face_tensor is not None:
-                    with torch.no_grad():
-                        emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+                    # OpenVINO GPU inference: numpy input, no torch overhead
+                    face_np = face_tensor.unsqueeze(0).numpy()  # [1, 3, 160, 160]
+                    emb = face_net_ov(face_np)[face_net_output][0]  # 512-D vector
                     student_embeddings.append(emb.tolist())
             except Exception: pass
             
@@ -560,8 +565,9 @@ def process_frame(image_b64):
                         if len(face_tensors) > 0:
                             face_tensor = face_tensors[0]
                             
-                            with torch.no_grad():
-                                emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+                                                        # OpenVINO GPU inference: numpy input, no torch overhead
+                            face_np = face_tensor.unsqueeze(0).numpy()  # [1, 3, 160, 160]
+                            emb = face_net_ov(face_np)[face_net_output][0]  # 512-D vector
                             
                             sid, name, score = recognize_face(emb)
 
@@ -773,8 +779,8 @@ def assign_face(p: AssignPayload):
     
     # 🎯 THIS LINE MUST EXIST AND MUST COME BEFORE emb IS COMPUTED
     face_tensor = face_tensors[0]
-    with torch.no_grad():
-        emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+    face_np = face_tensor.unsqueeze(0).numpy()
+    emb = face_net_ov(face_np)[face_net_output][0]
     
     # 🛡️ IDENTITY CONSISTENCY: If student already enrolled, verify face matches them
     if p.student_id in global_face_db and len(global_face_db[p.student_id]["embeddings"]) > 0:
