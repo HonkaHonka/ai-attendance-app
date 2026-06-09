@@ -28,7 +28,7 @@ from PIL import Image
 import io
 import asyncio
 from ultralytics import YOLO
-from facenet_pytorch import MTCNN, InceptionResnetV1
+from facenet_pytorch import MTCNN
 from typing import Dict
 import time
 import shutil
@@ -346,9 +346,12 @@ def verify_face(payload: VerifyPayload):
         
         face_tensor = mtcnn(img)
         if face_tensor is None: raise ValueError("No face detected")
-        with torch.no_grad():
-            live_embedding = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
-    except Exception: raise HTTPException(status_code=400, detail="No face detected in the camera.")
+        
+        # OpenVINO GPU inference (matches your new setup)
+        face_np = face_tensor.unsqueeze(0).numpy()
+        live_embedding = face_net_ov(face_np)[face_net_output][0]
+    except Exception: 
+        raise HTTPException(status_code=400, detail="No face detected in the camera.")
 
     best_match_name = "Unknown"
     best_match_score = -1.0 
