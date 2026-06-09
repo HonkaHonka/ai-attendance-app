@@ -1,17 +1,6 @@
 import os
 os.environ["OPENVINO_DEVICE"] = "GPU"
 
-# 🎯 MONKEY-PATCH: Intercept OpenVINO compile_model and force GPU
-import openvino as ov
-_original_compile_model = ov.Core.compile_model
-
-def _patched_compile_model(self, model, device_name=None, config=None):
-    if device_name in ("AUTO", "AUTO:CPU,GPU", "AUTO:GPU,CPU", None, "CPU"):
-        print(f"🔄 OpenVINO device override: {device_name} → GPU")
-        device_name = "GPU"
-    return _original_compile_model(self, model, device_name, config)
-
-ov.Core.compile_model = _patched_compile_model
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +8,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import pandas as pd
 import uvicorn
-import os
 import base64
 import numpy as np
 import pickle
@@ -28,7 +16,7 @@ from PIL import Image
 import io
 import asyncio
 from ultralytics import YOLO
-from facenet_pytorch import MTCNN
+from facenet_pytorch import MTCNN, InceptionResnetV1
 from typing import Dict
 import time
 import shutil
@@ -43,13 +31,12 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 device = torch.device("cpu")
 print(f"✅ RUNNING ON {device}")
 
-print("🔹 Loading YOLOv8n (PERSON TRACKING)...")
-yolo_person = YOLO("yolov8n_openvino_model/", task="detect")
-
-# 🎯 Warmup: forces predictor initialization so first real frame is fast
-dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-_ = yolo_person.track(dummy_frame, verbose=False, persist=True)
-print("✅ YOLO OpenVINO model loaded")
+print("🔹 Loading YOLOv8n (PyTorch CPU — stable tracking)...")
+# 🎯 PyTorch model on CPU. 640px is fast enough for smooth 5 FPS tracking.
+yolo_person = YOLO("yolov8n.pt")
+dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
+_ = yolo_person.track(dummy_frame, verbose=False, persist=True, device="cpu", imgsz=640)
+print("✅ YOLO loaded on CPU")
 
 print("🔹 Loading Face Quality Gate (MTCNN)...")
 mtcnn = MTCNN(keep_all=False, device=device)
@@ -429,7 +416,9 @@ def process_frame(image_b64):
         classes=[0],
         tracker="botsort.yaml",
         persist=True,
-        verbose=False
+        verbose=False,
+        device="cpu",
+        imgsz=640
     )
     print(f"🐛 YOLO raw: {len(results)} results, boxes={results[0].boxes is not None if results else 'N/A'}, ids={results[0].boxes.id is not None if (results and results[0].boxes is not None) else 'N/A'}")
 
