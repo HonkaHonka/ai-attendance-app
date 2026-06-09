@@ -431,6 +431,9 @@ def process_frame(image_b64):
         persist=True,
         verbose=False
     )
+    print(f"🐛 YOLO raw: {len(results)} results, boxes={results[0].boxes is not None if results else 'N/A'}, ids={results[0].boxes.id is not None if (results and results[0].boxes is not None) else 'N/A'}")
+
+
     
     faces_out = []
     current_frame_tracks = {}
