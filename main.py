@@ -628,6 +628,7 @@ def process_frame(image_b64):
                         
                         if len(face_tensors) > 0:
                             face_tensor = face_tensors[0]
+                            print(f"🆔 track_id={track_id} | status={person.get('status')} | last_processed={person.get('last_processed',0):.1f} | last_recognized={person.get('last_recognized',0):.1f}")
                             facenet_runs += 1
                             with torch.no_grad():
                                 emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
