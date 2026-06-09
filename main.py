@@ -466,7 +466,7 @@ def recognize_face(emb):
 def process_frame(image_b64):
     global live_tracker_memory
     t_start = time.time()
-
+    facenet_runs = 0
     if not image_b64:
         return []
     if "," in image_b64:
@@ -628,7 +628,7 @@ def process_frame(image_b64):
                         
                         if len(face_tensors) > 0:
                             face_tensor = face_tensors[0]
-                            
+                            facenet_runs += 1
                             with torch.no_grad():
                                 emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
                             
@@ -728,7 +728,8 @@ def process_frame(image_b64):
         print(f"🧠 MEM-TRACK: {len(live_tracker_memory)} active tracks | DB: {len(global_face_db)} students")
         process_frame._last_mem_report = current_time
     elapsed = (time.time() - t_start) * 1000
-    
+    if facenet_runs > 0:
+        print(f"🔥 FaceNet ran {facenet_runs} times this frame | Tracks: {len(current_frame_tracks)}")
         
     return faces_out
 
