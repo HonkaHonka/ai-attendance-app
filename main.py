@@ -149,7 +149,7 @@ def save_best_db(db):
     print(f"🏆 BEST DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
 
 def is_high_quality_embedding(prob, symmetry):
-    return prob > 0.90 and symmetry > 0.80
+    return prob > 0.85 and symmetry > 0.80
 
 def add_to_best_db(student_id, student_name, emb, prob, symmetry):
     if student_id not in global_best_db:
@@ -492,7 +492,7 @@ def process_frame(image_b64):
         return []
 
     frame_bgr = np.array(img)[:, :, ::-1]
-    print(f"🖼️ IMAGE SIZE: {img.size} | YOLO input: {frame_bgr.shape}")
+    
     timers['decode'] = (time.perf_counter() - t0) * 1000
 
     frame_bgr = np.array(img)[:, :, ::-1]
@@ -503,7 +503,7 @@ def process_frame(image_b64):
         conf=0.45,
         iou=0.40,
         classes=[0],
-        tracker="botsort.yaml",
+        tracker="bytetrack.yaml",
         persist=True,
         verbose=False
     )
@@ -541,7 +541,7 @@ def process_frame(image_b64):
 
             # FAST PATH 1: Known
             if (person.get("status") == "known" and 
-                (current_time - person.get("last_recognized", 0)) < 10.0):
+                (current_time - person.get("last_recognized", 0)) < 15.0):
                 current_frame_tracks[track_id] = person
                 faces_out.append({
                     "box": [x1, y1, x2 - x1, y2 - y1],
@@ -554,7 +554,7 @@ def process_frame(image_b64):
 
             # FAST PATH 2: Unknown
             if (person.get("status") == "unknown" and 
-                (current_time - person.get("last_processed", 0)) < 2.0):
+                (current_time - person.get("last_processed", 0)) < 5.0):
                 current_frame_tracks[track_id] = person
                 faces_out.append({
                     "box": [x1, y1, x2 - x1, y2 - y1],
@@ -567,7 +567,7 @@ def process_frame(image_b64):
 
             # FAST PATH 3: No face
             if (person.get("status") == "no_face" and 
-                (current_time - person.get("last_processed", 0)) < 1.0):
+                (current_time - person.get("last_processed", 0)) < 3.0):
                 current_frame_tracks[track_id] = person
                 faces_out.append({
                     "box": [x1, y1, x2 - x1, y2 - y1],
@@ -691,7 +691,7 @@ def process_frame(image_b64):
                                                 existing.append(emb.tolist())
                                                 save_required = True
                                                 
-                                                if probs_arr[best_idx] > 0.90 and symmetry > 0.80:
+                                                if probs_arr[best_idx] > 0.85 and symmetry > 0.80:
                                                     add_to_best_db(sid, name, emb, float(probs_arr[best_idx]), symmetry)
                                                 
                                                 session_stats["embeddings_added"][sid] = session_stats["embeddings_added"].get(sid, 0) + 1

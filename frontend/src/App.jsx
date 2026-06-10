@@ -201,7 +201,7 @@ function App() {
       
       wsRef.current.onopen = () => {
         // 🎯 Old reliable interval, but guarded by waitingForResponse
-        frameIntervalRef.current = setInterval(sendFrameToWebSocket, 300);
+        frameIntervalRef.current = setInterval(sendFrameToWebSocket, 500);
       };
       
       wsRef.current.onmessage = (event) => {
