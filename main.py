@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import pandas as pd
 import uvicorn
-import os
+import psutil
 import base64
 import numpy as np
 import pickle
@@ -465,8 +465,18 @@ def recognize_face(emb):
 
 def process_frame(image_b64):
     global live_tracker_memory
-    t_start = time.time()
+    t_start = time.perf_counter()
+    
+    # --- PROFILING STATE ---
+    timers = {}
     facenet_runs = 0
+    yunet_detect_runs = 0
+    yunet_extract_runs = 0
+    db_compare_count = 0  # how many embedding-to-embedding comparisons
+    process = psutil.Process(os.getpid())
+    mem_before = process.memory_info().rss / 1024 / 1024  # MB
+    # -----------------------
+
     if not image_b64:
         return []
     if "," in image_b64:
@@ -474,15 +484,17 @@ def process_frame(image_b64):
     if not image_b64:
         return []
 
+    t0 = time.perf_counter()
     try:
         img_bytes = base64.b64decode(image_b64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     except Exception:
         return []
+    timers['decode'] = (time.perf_counter() - t0) * 1000
 
     frame_bgr = np.array(img)[:, :, ::-1]
     
-        #
+    t1 = time.perf_counter()
     results = yolo_person.track(
         frame_bgr,
         conf=0.45,
@@ -492,6 +504,7 @@ def process_frame(image_b64):
         persist=True,
         verbose=False
     )
+    timers['yolo'] = (time.perf_counter() - t1) * 1000
     
     faces_out = []
     current_frame_tracks = {}
@@ -510,7 +523,7 @@ def process_frame(image_b64):
             track_id = int(track_id)
             
             if (x2 - x1) < 40 or (y2 - y1) < 40:
-             continue
+                continue
 
             person = live_tracker_memory.get(track_id, {
                 "student_id": None,
@@ -523,7 +536,7 @@ def process_frame(image_b64):
             })
             person["last_seen"] = current_time
 
-            # 🚀 FAST PATH 1: Known student — skip recognition for 10 seconds
+            # FAST PATH 1: Known
             if (person.get("status") == "known" and 
                 (current_time - person.get("last_recognized", 0)) < 10.0):
                 current_frame_tracks[track_id] = person
@@ -536,8 +549,7 @@ def process_frame(image_b64):
                 })
                 continue
 
-            # 🚀 FAST PATH 2: Unknown student — skip re-recognition for 2 seconds
-            # The box still tracks smoothly via YOLO; we just don't re-run MTCNN
+            # FAST PATH 2: Unknown
             if (person.get("status") == "unknown" and 
                 (current_time - person.get("last_processed", 0)) < 2.0):
                 current_frame_tracks[track_id] = person
@@ -550,7 +562,7 @@ def process_frame(image_b64):
                 })
                 continue
 
-            # 🚀 FAST PATH 3: No face detected — don't hammer MTCNN, wait 1 second
+            # FAST PATH 3: No face
             if (person.get("status") == "no_face" and 
                 (current_time - person.get("last_processed", 0)) < 1.0):
                 current_frame_tracks[track_id] = person
@@ -563,6 +575,8 @@ def process_frame(image_b64):
                 })
                 continue
 
+            # --- HEAD CROP ---
+            t_crop = time.perf_counter()
             head_h = int((y2 - y1) * 0.50)
             hx1 = max(0, x1 - 20)
             hy1 = max(0, y1 - 20)
@@ -571,11 +585,14 @@ def process_frame(image_b64):
             
             if hx2 <= hx1 or hy2 <= hy1:
                 continue
-                
             head_crop = img.crop((hx1, hy1, hx2, hy2))
+            timers['crop'] = timers.get('crop', 0) + (time.perf_counter() - t_crop) * 1000
 
-            # --- MTCNN detect + landmarks ---
+            # --- YUNET DETECT ---
+            t_yunet = time.perf_counter()
             f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
+            timers['yunet_detect'] = timers.get('yunet_detect', 0) + (time.perf_counter() - t_yunet) * 1000
+            yunet_detect_runs += 1
             
             face_found = False
             face_abs_box = None
@@ -585,7 +602,6 @@ def process_frame(image_b64):
                 probs_raw   = f_probs[0]
                 landmarks_raw = f_landmarks[0]
                 
-                # Robust shape normalization
                 boxes_arr = np.array(boxes_raw)
                 if boxes_arr.ndim == 1:
                     boxes_arr = boxes_arr.reshape(1, 4)
@@ -604,7 +620,6 @@ def process_frame(image_b64):
                     if probs_arr[best_idx] > 0.80:
                         face_found = True
                         
-                        # 🎯 ABSOLUTE FACE BOX for frontend zoom centering
                         fb = boxes_arr[best_idx]
                         face_abs_box = [
                             int(hx1 + fb[0]),
@@ -616,9 +631,12 @@ def process_frame(image_b64):
 
                         best_box = boxes_arr[best_idx:best_idx+1]
                         
+                        # --- YUNET EXTRACT ---
+                        t_extract = time.perf_counter()
                         extracted = mtcnn.extract(head_crop, best_box, save_path=None)
+                        timers['yunet_extract'] = timers.get('yunet_extract', 0) + (time.perf_counter() - t_extract) * 1000
+                        yunet_extract_runs += 1
                         
-                        # 🛡️ FIX: Handle Tensor/list/None return from extract()
                         if extracted is None:
                             face_tensors = []
                         elif isinstance(extracted, torch.Tensor):
@@ -628,12 +646,20 @@ def process_frame(image_b64):
                         
                         if len(face_tensors) > 0:
                             face_tensor = face_tensors[0]
-                            print(f"🆔 track_id={track_id} | status={person.get('status')} | last_processed={person.get('last_processed',0):.1f} | last_recognized={person.get('last_recognized',0):.1f}")
                             facenet_runs += 1
+                            
+                            # --- FACENET EMBEDDING ---
+                            t_facenet = time.perf_counter()
                             with torch.no_grad():
                                 emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+                            timers['facenet'] = timers.get('facenet', 0) + (time.perf_counter() - t_facenet) * 1000
                             
+                            # --- DB SEARCH ---
+                            t_db = time.perf_counter()
                             sid, name, score = recognize_face(emb)
+                            # Count comparisons: sum of all embeddings in DB
+                            db_compare_count += sum(len(v["embeddings"]) for v in global_face_db.values())
+                            timers['db_search'] = timers.get('db_search', 0) + (time.perf_counter() - t_db) * 1000
 
                             if sid:
                                 person["student_id"] = sid
@@ -643,30 +669,25 @@ def process_frame(image_b64):
                                 
                                 existing = global_face_db[sid]["embeddings"]
                                 
-                                                                # 🧠 SMART ACTIVE LEARNING: Enrich only if under cap and view is new
                                 if (0.72 < score < 0.94 and 
-                                    probs_arr[best_idx] > 0.85 and   # ← Lowered from 0.99 to capture more angles
+                                    probs_arr[best_idx] > 0.85 and
                                     len(existing) < 8):
                                     
-                                    # Check if this angle/view is already represented
                                     if len(existing) > 0:
                                         sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing]
-                                        if max(sims_to_existing) > 0.85:  # ← Lowered from 0.88 to allow more diversity
-                                            # Already have this angle, skip to prevent bloat
+                                        if max(sims_to_existing) > 0.85:
                                             pass
                                         else:
-                                            # New angle detected, check symmetry
                                             lm = landmarks_arr[best_idx]
                                             left_eye, right_eye, nose = lm[0], lm[1], lm[2]
                                             dist_left = np.linalg.norm(nose - left_eye)
                                             dist_right = np.linalg.norm(nose - right_eye)
                                             symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
                                             
-                                            if symmetry > 0.60:  # 🎯 Accept side profiles for classroom reality
+                                            if symmetry > 0.60:
                                                 existing.append(emb.tolist())
                                                 save_required = True
                                                 
-                                                # 🏆 BEST DB: Only save if truly excellent quality
                                                 if probs_arr[best_idx] > 0.90 and symmetry > 0.80:
                                                     add_to_best_db(sid, name, emb, float(probs_arr[best_idx]), symmetry)
                                                 
@@ -679,7 +700,6 @@ def process_frame(image_b64):
                                             else:
                                                 session_stats["rejected_by_symmetry"] += 1
                                     else:
-                                        # Should not happen (student has at least enrollment embedding), but safety
                                         pass
                                 else:
                                     if not (0.72 < score < 0.94) and len(existing) < 8:
@@ -701,7 +721,7 @@ def process_frame(image_b64):
             if person["status"] != "no_face":
                 face_out = {
                     "box": [x1, y1, x2 - x1, y2 - y1],
-                    "track_id": track_id,  # 🎯 Send track_id so frontend can follow you
+                    "track_id": track_id,
                     "student_id": person["student_id"],
                     "name": person["name"],
                     "status": person["status"]
@@ -710,7 +730,6 @@ def process_frame(image_b64):
                     face_out["face_box"] = face_abs_box
                 faces_out.append(face_out)
 
-    # --- TTL Tracker Memory ---
     for tid, tdata in current_frame_tracks.items():
         live_tracker_memory[tid] = tdata
     
@@ -720,18 +739,34 @@ def process_frame(image_b64):
     }
 
     if save_required:
+        t_save = time.perf_counter()
         save_face_db(global_face_db)
+        timers['db_save'] = (time.perf_counter() - t_save) * 1000
 
-    # --- MEMORY LEAK MONITOR ---
-    if not hasattr(process_frame, "_last_mem_report"):
-        process_frame._last_mem_report = 0
-    if current_time - process_frame._last_mem_report > 10:
-        print(f"🧠 MEM-TRACK: {len(live_tracker_memory)} active tracks | DB: {len(global_face_db)} students")
-        process_frame._last_mem_report = current_time
-    elapsed = (time.time() - t_start) * 1000
-    if facenet_runs > 0:
-        print(f"🔥 FaceNet ran {facenet_runs} times this frame | Tracks: {len(current_frame_tracks)}")
-        
+    # --- PROFILING REPORT ---
+    total = (time.perf_counter() - t_start) * 1000
+    mem_after = process.memory_info().rss / 1024 / 1024
+    mem_delta = mem_after - mem_before
+    
+    # Only print if anything meaningful happened, or every 30 frames (~6 sec)
+    if not hasattr(process_frame, "_frame_counter"):
+        process_frame._frame_counter = 0
+    process_frame._frame_counter += 1
+    
+    if facenet_runs > 0 or process_frame._frame_counter % 30 == 0:
+        print(f"\n{'='*60}")
+        print(f"📊 FRAME {process_frame._frame_counter} | People:{len(boxes) if 'boxes' in dir() else 0} | Total:{total:.1f}ms")
+        print(f"   Base64/Decode : {timers.get('decode',0):>6.1f}ms")
+        print(f"   YOLO Track    : {timers.get('yolo',0):>6.1f}ms")
+        print(f"   Head Crop     : {timers.get('crop',0):>6.1f}ms")
+        print(f"   YuNet Detect  : {timers.get('yunet_detect',0):>6.1f}ms ({yunet_detect_runs}x)")
+        print(f"   YuNet Extract : {timers.get('yunet_extract',0):>6.1f}ms ({yunet_extract_runs}x)")
+        print(f"   🔴 FaceNet    : {timers.get('facenet',0):>6.1f}ms ({facenet_runs}x)")
+        print(f"   🔴 DB Search   : {timers.get('db_search',0):>6.1f}ms ({db_compare_count} comparisons)")
+        print(f"   DB Save       : {timers.get('db_save',0):>6.1f}ms")
+        print(f"   Memory        : {mem_after:.0f}MB (Δ{mem_delta:+.0f}MB)")
+        print(f"{'='*60}")
+
     return faces_out
 
 @app.websocket("/ws/surveillance")
