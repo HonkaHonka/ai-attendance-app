@@ -488,9 +488,11 @@ def process_frame(image_b64):
     try:
         img_bytes = base64.b64decode(image_b64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        print(f"🖼️ IMAGE SIZE: {img.size} | YOLO input: {frame_bgr.shape}")
     except Exception:
         return []
+
+    frame_bgr = np.array(img)[:, :, ::-1]
+    print(f"🖼️ IMAGE SIZE: {img.size} | YOLO input: {frame_bgr.shape}")
     timers['decode'] = (time.perf_counter() - t0) * 1000
 
     frame_bgr = np.array(img)[:, :, ::-1]
@@ -503,8 +505,7 @@ def process_frame(image_b64):
         classes=[0],
         tracker="botsort.yaml",
         persist=True,
-        verbose=False,
-        imgsz=640
+        verbose=False
     )
     timers['yolo'] = (time.perf_counter() - t1) * 1000
     
