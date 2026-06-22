@@ -24,14 +24,19 @@ function App() {
   // ==========================================
   // STATE
   // ==========================================
-  const [view, setView] = useState('login'); 
+  const [view, setView] = useState('upload');  // ← Changed from 'login' to 'upload'
   const [email, setEmail] = useState('');
   const [facultyName, setFacultyName] = useState('');
+  const [rosterUploaded, setRosterUploaded] = useState(false);
+  const [availableRosters, setAvailableRosters] = useState([]);
+  const [selectedRosterFile, setSelectedRosterFile] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const [isDragging, setIsDragging] = useState(false);
   const [classes, setClasses] = useState([]);
   const [students, setStudents] = useState([]);
   const [selectedClass, setSelectedClass] = useState('');
   const [error, setError] = useState('');
-
+  const [isUpdateMode, setIsUpdateMode] = useState(false);
   // REMOVED: isModalOpen, enrollStep, capturedImages, isCapturing — live feed only
   
   const [isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
@@ -785,6 +790,118 @@ function App() {
       alert(`⚠️ Health check failed: ${err.message}`);
     }
   };
+
+        const checkExistingRoster = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/has-roster`);
+      const data = await res.json();
+      // Just set the flag, DON'T change the view
+      if (data.has_roster) {
+        setRosterUploaded(true);
+      }
+      // Always fetch available rosters for the list
+      fetchAvailableRosters();
+    } catch (err) {
+      // Backend might not be running or endpoint not added yet
+      // Just fetch available files from disk
+      fetchAvailableRosters();
+    }
+  };
+
+  
+
+const fetchAvailableRosters = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/list-rosters`);
+      const data = await res.json();
+      setAvailableRosters(data.files || []);
+    } catch (err) {
+      console.log("Could not fetch roster list");
+    }
+  };
+
+  const selectRoster = async (filename) => {
+    try {
+      const res = await fetch(`${API_BASE}/select-roster`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Select failed');
+      
+      setRosterUploaded(true);
+      setView('login');
+      alert(`✅ ${data.message}`);
+    } catch (err) {
+      alert(`❌ ${err.message}`);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API_BASE}/clear-roster`, { method: 'POST' });
+    } catch (e) { /* ignore */ }
+    
+    setEmail('');
+    setFacultyName('');
+    setClasses([]);
+    setStudents([]);
+    setSelectedClass('');
+    setAttendanceRecords({});
+    setRosterUploaded(false);
+    setSelectedRosterFile('');
+    setView('upload');
+    stopSurveillance();
+  };
+
+  const uploadFile = async (file) => {
+    setUploadError('');
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+      const res = await fetch(`${API_BASE}/upload-roster`, {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Upload failed');
+      
+      setRosterUploaded(true);
+      setView('login');
+      alert(`✅ ${data.message}`);
+    } catch (err) {
+      setUploadError(err.message);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) uploadFile(file);
+  };
+
+  const handleFileSelect = (e) => {
+    const file = e.target.files[0];
+    if (file) uploadFile(file);
+  };
+
+  // Check for existing roster on mount
+  useEffect(() => {
+    checkExistingRoster();
+  }, []);
     // ==========================================
   // CAMERA FOCUS STATE (Adapts to smart tracking)
   // ==========================================
@@ -831,16 +948,177 @@ function App() {
         <div className="nav-links"><a>Home</a><a>Study</a><a>Admissions</a><a>Research</a><a>Student Life</a><a>About Us</a></div>
       </nav>
 
-      {/* LOGIN */}
+                  {/* UPLOAD / SELECT ROSTER */}
+      {view === 'upload' && (
+        <div className="hero-section">
+          <div className="login-card" style={{ textAlign: 'center', maxWidth: '550px' }}>
+            <h2>📁 Class Roster Setup</h2>
+            <p style={{ color: '#666', fontSize: '14px', marginBottom: '20px' }}>
+              Upload a new Excel file or select an existing one.<br/>
+              Required columns: Faculty Email, Faculty Name, Class Nbr, Student ID, Student Name
+            </p>
+            
+            {/* UPLOAD NEW FILE */}
+            <div 
+              style={{
+                border: `2px dashed ${isDragging ? '#28a745' : '#ccc'}`,
+                borderRadius: '12px',
+                padding: '40px 30px',
+                margin: '20px 0',
+                cursor: 'pointer',
+                background: isDragging ? 'rgba(40, 167, 69, 0.05)' : '#f8f9fa',
+                transition: 'all 0.2s'
+              }}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => document.getElementById('file-input').click()}
+            >
+              <p style={{ fontSize: '42px', margin: '0 0 10px 0' }}>📊</p>
+              <p style={{ fontWeight: 'bold', color: '#333', margin: '0 0 5px 0' }}>
+                Click to browse or drag Excel file here
+              </p>
+              <p style={{ color: '#888', fontSize: '12px', margin: 0 }}>
+                Upload a new roster file (.xlsx, .xls)
+              </p>
+              <input 
+                id="file-input" 
+                type="file" 
+                accept=".xlsx,.xls" 
+                style={{ display: 'none' }}
+                onChange={handleFileSelect}
+              />
+            </div>
+            
+            {/* OR SELECT EXISTING */}
+            {availableRosters.length > 0 && (
+              <div style={{ marginTop: '20px', textAlign: 'left' }}>
+                <p style={{ 
+                  color: '#2f3254', 
+                  fontWeight: 'bold', 
+                  fontSize: '14px',
+                  marginBottom: '10px',
+                  textAlign: 'center'
+                }}>
+                  — OR select an existing roster —
+                </p>
+                <div style={{ 
+                  maxHeight: '200px', 
+                  overflowY: 'auto',
+                  border: '1px solid #ddd',
+                  borderRadius: '8px',
+                  background: '#fff'
+                }}>
+                  {availableRosters.map((file, idx) => (
+                    <div 
+                      key={idx}
+                      onClick={() => selectRoster(file.filename)}
+                      style={{
+                        padding: '12px 16px',
+                        borderBottom: idx < availableRosters.length - 1 ? '1px solid #eee' : 'none',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        transition: 'background 0.15s'
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.background = '#f0f4ff'}
+                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <span style={{ fontSize: '20px' }}>📄</span>
+                        <div>
+                          <div style={{ fontWeight: 'bold', color: '#333', fontSize: '13px' }}>
+                            {file.filename}
+                          </div>
+                          <div style={{ color: '#888', fontSize: '11px' }}>
+                            {file.size_kb} KB • {file.modified}
+                          </div>
+                        </div>
+                      </div>
+                      <span style={{ 
+                        color: '#2f3254', 
+                        fontWeight: 'bold', 
+                        fontSize: '12px',
+                        background: '#e8eaf6',
+                        padding: '4px 12px',
+                        borderRadius: '4px'
+                      }}>
+                        Select ➔
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            {uploadError && (
+              <p style={{ color: '#dc3545', fontSize: '14px', fontWeight: 'bold', marginTop: '15px' }}>
+                ❌ {uploadError}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+            {/* LOGIN */}
       {view === 'login' && (
         <div className="hero-section">
           <div className="login-card">
             <h2>Faculty Portal</h2>
+            <p style={{ color: '#666', fontSize: '13px', marginBottom: '15px' }}>
+              Roster loaded. Enter your faculty email to continue.
+            </p>
             <form onSubmit={handleLogin}>
-              <input type="email" placeholder="Enter email (e.g. ihab.awad@lu.ac.ae)" value={email} onChange={(e) => setEmail(e.target.value)} required />
+              <input 
+                type="email" 
+                placeholder="Enter email (e.g. ihab.awad@lu.ac.ae)" 
+                value={email} 
+                onChange={(e) => setEmail(e.target.value)} 
+                required 
+              />
               {error && <p style={{color: 'red', fontSize: '14px', fontWeight: 'bold'}}>{error}</p>}
               <button type="submit" className="btn-primary">Sign In to Portal</button>
             </form>
+            
+            {/* Action buttons below the form */}
+            <div style={{ 
+              marginTop: '20px', 
+              display: 'flex', 
+              flexDirection: 'column', 
+              gap: '10px', 
+              alignItems: 'center' 
+            }}>
+              <button 
+                style={{ 
+                  background: 'none', 
+                  border: 'none', 
+                  color: '#2f3254', 
+                  textDecoration: 'underline',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  padding: '5px'
+                }}
+                onClick={() => setView('upload')}
+              >
+                ← Upload different roster
+              </button>
+              
+              <button 
+                style={{ 
+                  background: 'none', 
+                  border: 'none', 
+                  color: '#dc3545', 
+                  textDecoration: 'underline',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  padding: '5px'
+                }}
+                onClick={handleLogout}
+              >
+                🚪 Logout / Reset
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -851,6 +1129,24 @@ function App() {
           <div className="content-box">
             <h2 className="section-title">Faculty Dashboard</h2>
             <h3 style={{color: '#555', marginTop: 0}}>Welcome, {facultyName}</h3>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+              <h3 style={{color: '#555', margin: 0}}>Welcome, {facultyName}</h3>
+              <button 
+                onClick={handleLogout}
+                style={{
+                  background: '#dc3545',
+                  color: 'white',
+                  border: 'none',
+                  padding: '8px 16px',
+                  borderRadius: '5px',
+                  cursor: 'pointer',
+                  fontWeight: 'bold',
+                  fontSize: '13px'
+                }}
+              >
+                🚪 Logout
+              </button>
+            </div>
             <div style={{overflowX: 'auto'}}>
               <table>
                 <thead>
@@ -882,7 +1178,22 @@ function App() {
         <div className="app-container">
           <div className="content-box">
             <button className="back-btn" onClick={() => setView('classes')}>← Back to Classes</button>
-            
+                        <button 
+              onClick={handleLogout}
+              style={{
+                background: '#dc3545',
+                color: 'white',
+                border: 'none',
+                padding: '8px 16px',
+                borderRadius: '5px',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                fontSize: '13px',
+                marginLeft: '10px'
+              }}
+            >
+              🚪 Logout
+            </button>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
               <h2 className="section-title" style={{ display: 'inline-block', margin: 0 }}>Class Roster: {selectedClass}</h2>
               <button style={{ background: '#28a745', color: 'white', padding: '10px 20px', borderRadius: '5px', border: 'none', cursor: 'pointer', fontWeight: 'bold' }} onClick={downloadAttendanceReport}>

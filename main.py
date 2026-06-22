@@ -34,7 +34,7 @@ from typing import Dict
 import time
 import shutil
 from typing import Optional
-
+from fastapi import UploadFile, File
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -130,7 +130,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-DATA_FILE = os.path.join(DATA_DIR, "KHC_REGISTERED_STUDENTS_31560.xlsx")
 MEMORY_FILE = os.path.join(DATA_DIR, "face_memory.pkl")
 BEST_MEMORY_FILE = os.path.join(DATA_DIR, "face_memory_best.pkl")
 
@@ -254,55 +253,136 @@ def validate_db_integrity(db):
             if np.isnan(arr).any() or np.isinf(arr).any():
                 errors.append(f"{sid}: emb[{i}] contains NaN/Inf")
     return errors
-try:
-    df = pd.read_excel(DATA_FILE)
-    df.columns = df.columns.str.strip()
-    df = df.fillna("")
-except: df = pd.DataFrame()
+df = pd.DataFrame()
 
 # =========================================================
 # EXCEL UPLOAD ENDPOINT
 # =========================================================
-from fastapi import UploadFile, File
+
 
 @app.post("/api/upload-roster")
 async def upload_roster(file: UploadFile = File(...)):
     if not file.filename.endswith(('.xlsx', '.xls')):
         raise HTTPException(400, "Only Excel files (.xlsx, .xls) are accepted")
     
-    temp_path = os.path.join(DATA_DIR, "temp_upload.xlsx")
-    with open(temp_path, "wb") as f:
+    # If file exists and is locked, use a numbered suffix
+    base_name = file.filename
+    file_path = os.path.join(DATA_DIR, base_name)
+    
+    # If locked, try filename_1.xlsx, filename_2.xlsx, etc.
+    counter = 1
+    original_path = file_path
+    while os.path.exists(file_path):
+        try:
+            # Test if we can open for writing
+            with open(file_path, 'a+b') as test:
+                pass
+            break  # File exists but we can write to it
+        except PermissionError:
+            # File is locked, try new name
+            name, ext = os.path.splitext(base_name)
+            file_path = os.path.join(DATA_DIR, f"{name}_{counter}{ext}")
+            counter += 1
+    
+    with open(file_path, "wb") as f:
         f.write(await file.read())
     
     try:
-        new_df = pd.read_excel(temp_path)
+        new_df = pd.read_excel(file_path)
         new_df.columns = new_df.columns.str.strip()
+        new_df = new_df.fillna("")
         
         required = ["Faculty Email", "Faculty Name", "Class Nbr", "Student ID", "Student Name"]
         missing = [c for c in required if c not in new_df.columns]
         if missing:
-            os.remove(temp_path)
+            os.remove(file_path)
             raise HTTPException(400, f"Missing required columns: {', '.join(missing)}")
         
-        # Replace current working file
-        os.replace(temp_path, DATA_FILE)
-        
-        # Reload global df
+        # Auto-select as active roster
         global df
-        df = pd.read_excel(DATA_FILE)
-        df.columns = df.columns.str.strip()
-        df = df.fillna("")
+        df = new_df
         
         return {
             "status": "success",
-            "message": f"Roster uploaded: {len(df)} rows, {df['Class Nbr'].nunique()} classes",
+            "message": f"Roster uploaded & selected: {len(df)} rows, {df['Class Nbr'].nunique()} classes",
+            "filename": os.path.basename(file_path),
             "faculties": df["Faculty Name"].unique().tolist()
         }
         
     except Exception as e:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
         raise HTTPException(400, f"Failed to parse Excel: {str(e)}")
+
+# =========================================================
+# DYNAMIC ROSTER MANAGEMENT
+# =========================================================
+
+@app.get("/api/has-roster")
+def has_roster():
+    """Check if a roster is currently loaded."""
+    return {
+        "has_roster": len(df) > 0,
+        "rows": len(df),
+        "classes": df["Class Nbr"].nunique() if len(df) > 0 else 0
+    }
+
+@app.get("/api/list-rosters")
+def list_rosters():
+    """List all available Excel files in the data directory."""
+    files = []
+    for f in os.listdir(DATA_DIR):
+        if f.endswith(('.xlsx', '.xls')):
+            files.append({
+                "filename": f,
+                "size_kb": round(os.path.getsize(os.path.join(DATA_DIR, f)) / 1024, 1),
+                "modified": time.strftime('%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(os.path.join(DATA_DIR, f))))
+            })
+    return {"files": files}
+
+@app.post("/api/select-roster")
+async def select_roster(payload: dict):
+    """Select which Excel file to use as the active roster."""
+    global df
+    
+    filename = payload.get("filename")
+    if not filename:
+        raise HTTPException(400, "Filename required")
+    
+    file_path = os.path.join(DATA_DIR, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(404, f"File not found: {filename}")
+    
+    try:
+        new_df = pd.read_excel(file_path)
+        new_df.columns = new_df.columns.str.strip()
+        new_df = new_df.fillna("")
+        
+        required = ["Faculty Email", "Faculty Name", "Class Nbr", "Student ID", "Student Name"]
+        missing = [c for c in required if c not in new_df.columns]
+        if missing:
+            raise HTTPException(400, f"Missing required columns: {', '.join(missing)}")
+        
+        # Set as active
+        df = new_df
+        
+        return {
+            "status": "success",
+            "message": f"Roster selected: {filename}",
+            "rows": len(df),
+            "faculties": df["Faculty Name"].unique().tolist(),
+            "classes": df["Class Nbr"].nunique()
+        }
+        
+    except Exception as e:
+        raise HTTPException(400, f"Failed to load roster: {str(e)}")
+
+@app.post("/api/clear-roster")
+def clear_roster():
+    """Clear the current roster (logout / reset)."""
+    global df
+    df = pd.DataFrame()
+    return {"status": "success", "message": "Roster cleared"}
 
 # =========================================================
 # BASIC API ENDPOINTS
