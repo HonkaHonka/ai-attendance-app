@@ -261,6 +261,50 @@ try:
 except: df = pd.DataFrame()
 
 # =========================================================
+# EXCEL UPLOAD ENDPOINT
+# =========================================================
+from fastapi import UploadFile, File
+
+@app.post("/api/upload-roster")
+async def upload_roster(file: UploadFile = File(...)):
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        raise HTTPException(400, "Only Excel files (.xlsx, .xls) are accepted")
+    
+    temp_path = os.path.join(DATA_DIR, "temp_upload.xlsx")
+    with open(temp_path, "wb") as f:
+        f.write(await file.read())
+    
+    try:
+        new_df = pd.read_excel(temp_path)
+        new_df.columns = new_df.columns.str.strip()
+        
+        required = ["Faculty Email", "Faculty Name", "Class Nbr", "Student ID", "Student Name"]
+        missing = [c for c in required if c not in new_df.columns]
+        if missing:
+            os.remove(temp_path)
+            raise HTTPException(400, f"Missing required columns: {', '.join(missing)}")
+        
+        # Replace current working file
+        os.replace(temp_path, DATA_FILE)
+        
+        # Reload global df
+        global df
+        df = pd.read_excel(DATA_FILE)
+        df.columns = df.columns.str.strip()
+        df = df.fillna("")
+        
+        return {
+            "status": "success",
+            "message": f"Roster uploaded: {len(df)} rows, {df['Class Nbr'].nunique()} classes",
+            "faculties": df["Faculty Name"].unique().tolist()
+        }
+        
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise HTTPException(400, f"Failed to parse Excel: {str(e)}")
+
+# =========================================================
 # BASIC API ENDPOINTS
 # =========================================================
 @app.get("/api/login")
@@ -535,20 +579,28 @@ def process_frame(image_b64):
                 "frames_no_face": 0,
                 "last_seen": current_time,
                 "last_recognized": 0,
-                "last_processed": 0
+                "last_processed": 0,
+                "last_face_seen": 0
             })
             person["last_seen"] = current_time
 
-            # FAST PATH 1: Known
+                        # FAST PATH 1: Known — skip recognition for 10 seconds
             if (person.get("status") == "known" and 
-                (current_time - person.get("last_recognized", 0)) < 15.0):
+                (current_time - person.get("last_recognized", 0)) < 10.0):
+                
+                # 🛡️ If no face seen in 3 seconds, degrade to "no_face"
+                if (current_time - person.get("last_face_seen", 0)) > 3.0:
+                    person["status"] = "no_face"
+                    person["name"] = "No Face"
+                    person["frames_no_face"] = 3
+                
                 current_frame_tracks[track_id] = person
                 faces_out.append({
                     "box": [x1, y1, x2 - x1, y2 - y1],
                     "track_id": track_id,
-                    "student_id": person["student_id"],
+                    "student_id": person["student_id"] if person["status"] == "known" else None,
                     "name": person["name"],
-                    "status": "known"
+                    "status": person["status"]
                 })
                 continue
 
@@ -622,7 +674,7 @@ def process_frame(image_b64):
                     
                     if probs_arr[best_idx] > 0.80:
                         face_found = True
-                        
+                        person["last_face_seen"] = current_time 
                         fb = boxes_arr[best_idx]
                         face_abs_box = [
                             int(hx1 + fb[0]),
@@ -977,6 +1029,12 @@ def unassign_student(p: UnassignPayload):
         save_face_db(global_face_db)
         print(f"🗑️ Removed student {p.student_id} from face DB")
     
+
+    if p.student_id in global_best_db:
+        del global_best_db[p.student_id]
+        save_best_db(global_best_db)
+        print(f"🗑️ Removed student {p.student_id} from best DB")
+
     # Clear tracker so the face immediately becomes unknown again
     global live_tracker_memory
     live_tracker_memory.clear()
