@@ -35,11 +35,19 @@ import time
 import shutil
 from typing import Optional
 from fastapi import UploadFile, File
+from fastapi import Request
 # =========================================================
 # APP SETUP
 # =========================================================
 app = FastAPI(title="AI Live Attendance Backend")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware, 
+    allow_origins=["*"], 
+    allow_credentials=True, 
+    allow_methods=["*"], 
+    allow_headers=["*"],
+    expose_headers=["X-QR-Token"]  # <--- ADD THIS LINE
+)
 
 device = torch.device("cpu")
 print(f"✅ RUNNING ON {device}")
@@ -383,6 +391,180 @@ def clear_roster():
     global df
     df = pd.DataFrame()
     return {"status": "success", "message": "Roster cleared"}
+
+
+import secrets
+import qrcode
+from io import BytesIO
+from fastapi.responses import StreamingResponse, HTMLResponse
+
+# Import email service (add at top of file with other imports)
+from email_service import send_verification_email
+EMAIL_ENABLED = True
+
+# QR Session store: token → {status, email, name, created_at, verify_token}
+qr_sessions = {}
+
+# =========================================
+# QR CODE AUTHENTICATION
+# =========================================
+
+@app.get("/api/generate-qr")
+def generate_qr(frontend_url: str = "http://127.0.0.1:5173"): # <--- Added parameter
+    """TV calls this to get a QR code for teacher authentication."""
+    token = secrets.token_urlsafe(32)
+    
+    qr_sessions[token] = {
+        "status": "pending",
+        "email": None,
+        "faculty_name": None,
+        "verify_token": None,
+        "created_at": time.time()
+    }
+    
+    _clean_old_sessions()
+    
+    qr = qrcode.QRCode(version=3, box_size=12, border=2)
+    
+    # URL that opens when teacher scans QR (points to React app on network)
+    auth_url = f"{frontend_url}/?token={token}" # <--- Updated URL
+    qr.add_data(auth_url)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="#2f3254", back_color="white")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    
+    return StreamingResponse(buf, media_type="image/png", headers={
+        "X-QR-Token": token
+    })
+
+def _clean_old_sessions():
+    """Remove expired QR sessions."""
+    current_time = time.time()
+    expired = [t for t, data in qr_sessions.items() 
+               if current_time - data["created_at"] > 600]  # 10 min expiry
+    for t in expired:
+        del qr_sessions[t]
+
+@app.get("/api/check-qr-status")
+def check_qr_status(token: str):
+    """TV polls this every 2 seconds to check if teacher verified."""
+    session = qr_sessions.get(token)
+    if not session:
+        raise HTTPException(404, "Session expired or invalid")
+    
+    if time.time() - session["created_at"] > 600:
+        del qr_sessions[token]
+        raise HTTPException(410, "Session expired")
+    
+    return {
+        "status": session["status"],  # "pending", "email_entered", "approved"
+        "email": session.get("email"),
+        "name": session.get("faculty_name")
+    }
+
+
+
+@app.post("/api/request-email-verification")
+async def request_email_verification(payload: dict, request: Request): # <--- Added request
+    if df.empty:
+        raise HTTPException(400, "No roster loaded. Please upload a roster first.")
+    
+    token = payload.get("token")
+    email = payload.get("email")
+    
+    if not token or not email:
+        raise HTTPException(400, "Token and email required")
+    
+    session = qr_sessions.get(token)
+    if not session or session["status"] != "pending":
+        raise HTTPException(400, "Invalid or expired QR session")
+    
+    user = df[df["Faculty Email"].str.lower() == email.lower()]
+    if user.empty:
+        raise HTTPException(404, "Faculty email not found in roster")
+    
+    verify_token = secrets.token_urlsafe(32)
+    session["status"] = "email_entered"
+    session["email"] = email
+    session["faculty_name"] = user.iloc[0]["Faculty Name"]
+    session["verify_token"] = verify_token
+    
+    # Get the actual IP address used to reach the backend
+    host_url = str(request.base_url).rstrip("/")
+    
+    # Build verification URL (teacher clicks this in email)
+    verify_url = f"{host_url}/api/confirm-verification?vt={verify_token}&t={token}"
+    
+    if EMAIL_ENABLED:
+        success = send_verification_email(
+            to_email=email,
+            teacher_name=session["faculty_name"],
+            verify_url=verify_url
+        )
+        if not success:
+            raise HTTPException(500, "Failed to send verification email")
+    else:
+        print(f"\n{'='*60}")
+        print(f"📧 DEV MODE: Verification URL for {email}:")
+        print(f"   {verify_url}")
+        print(f"{'='*60}\n")
+    
+    return {
+        "status": "success",
+        "message": f"Verification email sent to {email}"
+    }
+
+@app.get("/api/confirm-verification")
+def confirm_verification(vt: str, t: str):
+    """
+    Teacher clicks link in email → this endpoint approves the session.
+    Returns HTML page that auto-redirects or shows success.
+    """
+    session = qr_sessions.get(t)
+    if not session or session.get("verify_token") != vt:
+        return HTMLResponse("""
+        <html><body style="font-family: Arial; text-align: center; padding: 50px;">
+            <h1 style="color: #dc3545;">❌ Invalid or Expired Link</h1>
+            <p>This verification link has expired or is invalid.</p>
+            <a href="/" style="color: #2f3254;">Go back to portal</a>
+        </body></html>
+        """)
+    
+    # Approve session
+    session["status"] = "approved"
+    
+    return HTMLResponse(f"""
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {{ font-family: Arial, sans-serif; text-align: center; padding: 40px 20px; 
+                   background: linear-gradient(135deg, #2f3254 0%, #1a1a2e 100%); min-height: 100vh; 
+                   margin: 0; display: flex; align-items: center; justify-content: center; }}
+            .card {{ background: white; padding: 40px; border-radius: 16px; 
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-width: 400px; width: 100%; }}
+            h1 {{ color: #28a745; margin-bottom: 10px; }}
+            p {{ color: #666; line-height: 1.6; }}
+            .icon {{ font-size: 64px; margin-bottom: 20px; }}
+            .name {{ color: #2f3254; font-weight: bold; font-size: 18px; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <div class="icon">✅</div>
+            <h1>Verification Successful!</h1>
+            <p>Welcome, <span class="name">{session['faculty_name']}</span></p>
+            <p>You can now return to the classroom screen.<br>It will automatically log you in.</p>
+            <p style="margin-top: 30px; color: #888; font-size: 12px;">
+                Liwa University Faculty Portal
+            </p>
+        </div>
+    </body>
+    </html>
+    """)
 
 # =========================================================
 # BASIC API ENDPOINTS

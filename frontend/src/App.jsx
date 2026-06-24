@@ -1,9 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import Webcam from "react-webcam";
 import './App.css';
 
-const API_BASE = "http://127.0.0.1:8000/api";
-const WS_BASE = "ws://127.0.0.1:8000/ws";
+// Automatically grab the network IP address being used
+const HOST = window.location.hostname;
+const API_BASE = `http://${HOST}:8000/api`;
+const WS_BASE = `ws://${HOST}:8000/ws`;
 
 // Camera constraints
 const SURVEILLANCE_CONSTRAINTS = {
@@ -21,6 +23,7 @@ const AI_W = 1280;
 const AI_H = 720;
 
 function App() {
+  console.log('App rendering');
   // ==========================================
   // STATE
   // ==========================================
@@ -62,8 +65,14 @@ function App() {
   const inspectCanvasRef = useRef(null); 
   const frameIntervalRef = useRef(null);
   const waitingForResponse = useRef(false);
+
+  const [qrImage, setQrImage] = useState(null);
+  const [qrToken, setQrToken] = useState(null);
+  const [qrStatus, setQrStatus] = useState('pending')
   
-  
+  const [mobileEmail, setMobileEmail] = useState('');
+  const [mobileToken, setMobileToken] = useState('');
+  const [verifyMessage, setVerifyMessage] = useState('');
 
 
   const getCanvasContentBounds = (canvas) => {
@@ -101,10 +110,87 @@ function App() {
       fetchClasses(email);
     } catch (err) { setError(err.message); }
   };
+const handleLogout = async () => {
+  try {
+    await fetch(`${API_BASE}/clear-roster`, { method: 'POST' });
+  } catch (err) {
+    console.error("Logout error:", err);
+  }
+  setEmail('');
+  setFacultyName('');
+  setClasses([]);
+  setStudents([]);
+  setSelectedClass('');
+  setAttendanceRecords({});
+  setRosterUploaded(false);
+  setView('upload');
+  stopSurveillance();
+  if (window._qrPollInterval) {
+    clearInterval(window._qrPollInterval);
+    window._qrPollInterval = null;
+  }
+  setQrImage(null);
+  setQrToken(null);
+  setQrStatus('pending');
+};
 
-  const fetchClasses = async (userEmail) => {
+// ==========================================
+  // ROSTER UPLOAD HANDLERS
+  // ==========================================
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      await uploadRosterFile(files[0]);
+    }
+  };
+
+  const handleFileSelect = async (e) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      await uploadRosterFile(files[0]);
+    }
+    // Reset the input so the same file can be uploaded again if needed
+    e.target.value = null; 
+  };
+
+  const uploadRosterFile = async (file) => {
+    setUploadError('');
+    const formData = new FormData();
+    formData.append('file', file);
+    
     try {
-      const res = await fetch(`${API_BASE}/classes?email=${encodeURIComponent(userEmail)}`);
+      const res = await fetch(`${API_BASE}/upload-roster`, {
+        method: 'POST',
+        body: formData
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Upload failed');
+      
+      setRosterUploaded(true);
+      fetchAvailableRosters(); // Refresh the list
+      setView('login');        // Move to the QR login screen!
+      alert(`✅ ${data.message}`);
+      
+    } catch (err) {
+      setUploadError(`Upload Error: ${err.message}`);
+    }
+  };
+  const fetchClasses = async (generateQRuserEmail) => {
+    try {
+      const res = await fetch(`${API_BASE}/classes?email=${encodeURIComponent(generateQRuserEmail)}`);
       setClasses(await res.json());
       setView('classes'); 
       stopSurveillance(); 
@@ -838,74 +924,138 @@ const fetchAvailableRosters = async () => {
     }
   };
 
-  const handleLogout = async () => {
-    try {
-      await fetch(`${API_BASE}/clear-roster`, { method: 'POST' });
-    } catch (e) { /* ignore */ }
-    
-    setEmail('');
-    setFacultyName('');
-    setClasses([]);
-    setStudents([]);
-    setSelectedClass('');
-    setAttendanceRecords({});
-    setRosterUploaded(false);
-    setSelectedRosterFile('');
-    setView('upload');
-    stopSurveillance();
-  };
+    // ==========================================
+  // QR AUTHENTICATION
+  // ==========================================
+  
+ 
 
-  const uploadFile = async (file) => {
-    setUploadError('');
-    const formData = new FormData();
-    formData.append('file', file);
-    
+  const generateQR = async () => {
     try {
-      const res = await fetch(`${API_BASE}/upload-roster`, {
-        method: 'POST',
-        body: formData
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Upload failed');
+      // Get the current frontend URL (e.g. http://192.168.1.15:5173)
+      const frontendUrl = window.location.origin;
       
-      setRosterUploaded(true);
-      setView('login');
-      alert(`✅ ${data.message}`);
+      const res = await fetch(`${API_BASE}/generate-qr?frontend_url=${encodeURIComponent(frontendUrl)}`);
+      const token = res.headers.get('X-QR-Token');
+      if (!token) throw new Error('No token in response');
+      setQrToken(token);
+      
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setQrImage(url);
+      
+      startQRPolling(token);
     } catch (err) {
-      setUploadError(err.message);
+      console.error("QR generation failed", err);
+      setQrImage(null);
+      setQrStatus('pending');
     }
   };
 
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    setIsDragging(true);
+// Cleanup polling on unmount
+useEffect(() => {
+  return () => {
+    if (window._qrPollInterval) {
+      clearInterval(window._qrPollInterval);
+      window._qrPollInterval = null;
+    }
   };
+}, []);
 
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
+const startQRPolling = (token) => {
+  // Clear any existing interval
+  if (window._qrPollInterval) {
+    clearInterval(window._qrPollInterval);
+  }
+  
+  const interval = setInterval(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/check-qr-status?token=${token}`);
+      const data = await res.json();
+      
+      setQrStatus(data.status);
+      
+      if (data.status === 'approved') {
+        clearInterval(interval);
+        window._qrPollInterval = null;
+        setEmail(data.email);
+        setFacultyName(data.name);
+        // Small delay so teacher sees "approved" message
+        setTimeout(() => {
+          fetchClasses(data.email);
+        }, 1500);
+      }
+    } catch (err) {
+      // Session expired or error
+      clearInterval(interval);
+      window._qrPollInterval = null;
+      setQrStatus('pending');
+      setQrImage(null);
+      // Regenerate QR after delay
+      setTimeout(() => {
+        generateQR();
+      }, 2000);
+    }
+  }, 2000);
+  
+  window._qrPollInterval = interval;
+};
 
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file) uploadFile(file);
-  };
-
-  const handleFileSelect = (e) => {
-    const file = e.target.files[0];
-    if (file) uploadFile(file);
-  };
-
-  // Check for existing roster on mount
-  useEffect(() => {
+// Detect URL parameters on mount
+useEffect(() => {
+  const urlParams = new URLSearchParams(window.location.search);
+  const qrToken = urlParams.get('token');
+  const confirmVt = urlParams.get('vt');
+  const confirmT = urlParams.get('t');
+  
+  if (confirmVt && confirmT) {
+    setView('confirm-success');
+  } else if (qrToken) {
+    setView('verify-mobile');
+  } else {
     checkExistingRoster();
-  }, []);
+  }
+}, []);
+
+// Generate QR when login view is shown
+useEffect(() => {
+  if (view === 'login' && !qrImage) {
+    generateQR();
+  }
+  return () => {
+    if (window._qrPollInterval) {
+      clearInterval(window._qrPollInterval);
+      window._qrPollInterval = null;
+    }
+  };
+}, [view]);
+
+  const handleMobileVerify = async (e) => {
+    e.preventDefault();
+    setVerifyMessage('');
+    
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get('token');
+    
+    try {
+      const res = await fetch(`${API_BASE}/request-email-verification`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, email: mobileEmail })
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed');
+      
+      setVerifyMessage('✅ Check your email for verification link!');
+    } catch (err) {
+      setVerifyMessage(`❌ ${err.message}`);
+    }
+  };
     // ==========================================
   // CAMERA FOCUS STATE (Adapts to smart tracking)
   // ==========================================
-  const cameraFocus = React.useMemo(() => {
+  const cameraFocus = useMemo(() => {
     if (!detectedFaces || detectedFaces.length === 0) {
       return { mode: 'empty', target: null, coverage: 0 };
     }
@@ -1061,74 +1211,174 @@ const fetchAvailableRosters = async () => {
         </div>
       )}
 
-            {/* LOGIN */}
+             
+            {/* LOGIN - QR CODE ONLY */}
       {view === 'login' && (
         <div className="hero-section">
-          <div className="login-card">
-            <h2>Faculty Portal</h2>
-            <p style={{ color: '#666', fontSize: '13px', marginBottom: '15px' }}>
-              Roster loaded. Enter your faculty email to continue.
+          <div className="login-card" style={{ textAlign: 'center', maxWidth: '500px' }}>
+            <h2>🔐 Faculty Portal</h2>
+            <p style={{ color: '#666', fontSize: '14px', marginBottom: '20px' }}>
+              Scan the QR code with your phone to authenticate securely
             </p>
-            <form onSubmit={handleLogin}>
+            
+            {/* QR CODE */}
+            <div style={{ 
+              background: '#fff', 
+              padding: '25px', 
+              borderRadius: '16px',
+              marginBottom: '20px',
+              border: '3px solid #ffcb05',
+              boxShadow: '0 8px 30px rgba(0,0,0,0.15)'
+            }}>
+              {qrImage ? (
+                <img src={qrImage} alt="QR Code" style={{ width: '220px', height: '220px' }} />
+              ) : (
+                <div style={{ width: '220px', height: '220px', background: '#f0f0f0', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto' }}>
+                  <span style={{ color: '#999' }}>Loading QR...</span>
+                </div>
+              )}
+            </div>
+            
+            {/* Status indicator */}
+            <div style={{
+              padding: '12px 20px',
+              borderRadius: '8px',
+              background: qrStatus === 'approved' ? '#d4edda' : 
+                         qrStatus === 'email_entered' ? '#fff3cd' : '#e8eaf6',
+              color: qrStatus === 'approved' ? '#155724' : 
+                     qrStatus === 'email_entered' ? '#856404' : '#2f3254',
+              fontWeight: 'bold',
+              fontSize: '14px',
+              marginBottom: '15px'
+            }}>
+              {qrStatus === 'pending' && '⏳ Waiting for scan...'}
+              {qrStatus === 'email_entered' && '📧 Check your email for verification link'}
+              {qrStatus === 'approved' && '✅ Verified! Logging you in...'}
+            </div>
+            
+            <p style={{ color: '#888', fontSize: '12px' }}>
+              Open your camera app and scan the code above
+            </p>
+            
+            <button 
+              style={{ marginTop: '20px', background: 'none', border: 'none', color: '#2f3254', textDecoration: 'underline', cursor: 'pointer', fontSize: '13px' }}
+              onClick={() => setView('upload')}
+            >
+              ← Upload different roster
+            </button>
+          </div>
+        </div>
+      )}
+
+
+            {/* MOBILE: Email Entry (after scanning QR) */}
+      {view === 'verify-mobile' && (
+        <div className="hero-section" style={{ background: '#f0f2f5' }}>
+          <div className="login-card" style={{ textAlign: 'center', maxWidth: '400px' }}>
+            <div style={{ fontSize: '48px', marginBottom: '10px' }}>🛡️</div>
+            <h2>Liwa University</h2>
+            <p style={{ color: '#666', fontSize: '14px', marginBottom: '25px' }}>
+              Enter your faculty email to receive verification link
+            </p>
+            
+            <form onSubmit={handleMobileVerify} style={{ textAlign: 'left' }}>
+              <label style={{ display: 'block', marginBottom: '6px', color: '#333', fontWeight: 'bold', fontSize: '13px' }}>
+                Faculty Email
+              </label>
               <input 
                 type="email" 
-                placeholder="Enter email (e.g. ihab.awad@lu.ac.ae)" 
-                value={email} 
-                onChange={(e) => setEmail(e.target.value)} 
-                required 
+                placeholder="ihab.awad@lu.ac.ae" 
+                value={mobileEmail}
+                onChange={(e) => setMobileEmail(e.target.value)}
+                required
+                style={{ 
+                  width: '100%', 
+                  padding: '12px', 
+                  marginBottom: '15px',
+                  border: '1px solid #ddd',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  boxSizing: 'border-box'
+                }}
               />
-              {error && <p style={{color: 'red', fontSize: '14px', fontWeight: 'bold'}}>{error}</p>}
-              <button type="submit" className="btn-primary">Sign In to Portal</button>
+              <button 
+                type="submit" 
+                style={{ 
+                  width: '100%',
+                  padding: '14px',
+                  background: '#2f3254', 
+                  color: 'white', 
+                  border: 'none', 
+                  borderRadius: '8px', 
+                  cursor: 'pointer',
+                  fontWeight: 'bold',
+                  fontSize: '15px'
+                }}
+              >
+                📧 Send Verification Email
+              </button>
             </form>
             
-            {/* Action buttons below the form */}
+            {verifyMessage && (
+              <div style={{ 
+                marginTop: '20px', 
+                padding: '15px',
+                borderRadius: '8px',
+                background: verifyMessage.includes('✅') ? '#d4edda' : '#f8d7da',
+                color: verifyMessage.includes('✅') ? '#155724' : '#721c24',
+                fontWeight: 'bold',
+                fontSize: '14px'
+              }}>
+                {verifyMessage}
+              </div>
+            )}
+            
+            <p style={{ marginTop: '20px', color: '#aaa', fontSize: '12px' }}>
+              Make sure your email exists in the class roster
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* CONFIRMATION SUCCESS (after clicking email link) */}
+      {view === 'confirm-success' && (
+        <div className="hero-section" style={{ background: 'linear-gradient(135deg, #2f3254 0%, #1a1a2e 100%)' }}>
+          <div style={{ 
+            textAlign: 'center', 
+            maxWidth: '400px',
+            background: 'white',
+            padding: '40px',
+            borderRadius: '16px',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)'
+          }}>
+            <div style={{ fontSize: '64px', marginBottom: '15px' }}>✅</div>
+            <h2 style={{ color: '#28a745', marginBottom: '10px' }}>Verification Successful!</h2>
+            <p style={{ color: '#666', fontSize: '15px', lineHeight: '1.6' }}>
+              You can now return to the classroom screen.<br/>
+              It will automatically log you in.
+            </p>
             <div style={{ 
-              marginTop: '20px', 
-              display: 'flex', 
-              flexDirection: 'column', 
-              gap: '10px', 
-              alignItems: 'center' 
+              marginTop: '25px',
+              padding: '15px',
+              background: '#e8eaf6',
+              borderRadius: '8px',
+              color: '#2f3254',
+              fontSize: '13px'
             }}>
-              <button 
-                style={{ 
-                  background: 'none', 
-                  border: 'none', 
-                  color: '#2f3254', 
-                  textDecoration: 'underline',
-                  cursor: 'pointer',
-                  fontSize: '13px',
-                  padding: '5px'
-                }}
-                onClick={() => setView('upload')}
-              >
-                ← Upload different roster
-              </button>
-              
-              <button 
-                style={{ 
-                  background: 'none', 
-                  border: 'none', 
-                  color: '#dc3545', 
-                  textDecoration: 'underline',
-                  cursor: 'pointer',
-                  fontSize: '13px',
-                  padding: '5px'
-                }}
-                onClick={handleLogout}
-              >
-                🚪 Logout / Reset
-              </button>
+              🎓 Liwa University Faculty Portal
             </div>
           </div>
         </div>
       )}
+
+
 
       {/* CLASSES */}
       {view === 'classes' && (
         <div className="app-container">
           <div className="content-box">
             <h2 className="section-title">Faculty Dashboard</h2>
-            <h3 style={{color: '#555', marginTop: 0}}>Welcome, {facultyName}</h3>
+            
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
               <h3 style={{color: '#555', margin: 0}}>Welcome, {facultyName}</h3>
               <button 
