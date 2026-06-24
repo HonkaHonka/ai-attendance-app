@@ -61,6 +61,19 @@ _ = yolo_person.track(dummy_frame, verbose=False, persist=True)
 print("✅ YOLO OpenVINO model loaded")
 
 print("🔹 Loading Face Quality Gate (YuNet)...")
+import socket
+
+def get_local_ip():
+    """Gets the actual local network IP (e.g. 192.168.0.101) of this machine."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Doesn't have to be reachable, just forces the OS to pick the right network interface
+        s.connect(("8.8.8.8", 80)) 
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 class YuNetMTCNNWrapper:
     def __init__(self, model_path="face_detection_yunet_2023mar.onnx"):
@@ -410,7 +423,7 @@ qr_sessions = {}
 # =========================================
 
 @app.get("/api/generate-qr")
-def generate_qr(frontend_url: str = "http://127.0.0.1:5173"): # <--- Added parameter
+def generate_qr(frontend_url: str = "http://127.0.0.1:8000"): 
     """TV calls this to get a QR code for teacher authentication."""
     token = secrets.token_urlsafe(32)
     
@@ -424,10 +437,17 @@ def generate_qr(frontend_url: str = "http://127.0.0.1:5173"): # <--- Added param
     
     _clean_old_sessions()
     
-    qr = qrcode.QRCode(version=3, box_size=12, border=2)
+    # 🎯 THE MAGIC TRICK: 
+    # If the TV is using localhost, force the QR code to use the real Network IP
+    if "localhost" in frontend_url or "127.0.0.1" in frontend_url:
+        network_ip = get_local_ip()
+        auth_url = f"http://{network_ip}:8000/?token={token}"
+    else:
+        auth_url = f"{frontend_url}/?token={token}"
+        
+    print(f"📱 QR Code generated targeting: {auth_url}") # Helpful for debugging!
     
-    # URL that opens when teacher scans QR (points to React app on network)
-    auth_url = f"{frontend_url}/?token={token}" # <--- Updated URL
+    qr = qrcode.QRCode(version=3, box_size=12, border=2)
     qr.add_data(auth_url)
     qr.make(fit=True)
     
