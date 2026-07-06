@@ -22,6 +22,7 @@ import uvicorn
 import psutil
 import base64
 import numpy as np
+from fastapi.responses import FileResponse
 import torch
 from PIL import Image
 import io
@@ -148,6 +149,22 @@ print("🔹 Loading Face Embedding Model...")
 face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+frontend_dist = os.path.join(BASE_DIR, "frontend", "dist")
+
+# Serve static assets first
+app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+
+# Serve index.html for all other routes (SPA behavior)
+@app.get("/")
+def serve_index():
+    return FileResponse(os.path.join(frontend_dist, "index.html"))
+
+@app.get("/{path:path}")
+def serve_spa(path: str):
+    # Don't intercept API routes
+    if path.startswith("api/") or path.startswith("ws/"):
+        raise HTTPException(status_code=404)
+    return FileResponse(os.path.join(frontend_dist, "index.html"))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
