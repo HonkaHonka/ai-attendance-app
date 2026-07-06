@@ -1377,7 +1377,17 @@ def export_attendance(payload: AttendanceExportPayload):
     
     headers = { 'Content-Disposition': f'attachment; filename="Attendance_Class_{payload.class_nbr}.xlsx"' }
     return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
+@app.get("/api/debug-routes")
+def debug_routes():
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "methods"):
+            routes.append({
+                "path": route.path,
+                "methods": list(route.methods),
+                "name": route.name
+            })
+    return {"routes": routes, "total": len(routes)}
 # =========================================================
 # FRONTEND
 # =========================================================
