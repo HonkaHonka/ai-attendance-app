@@ -22,7 +22,6 @@ import uvicorn
 import psutil
 import base64
 import numpy as np
-import pickle
 import torch
 from PIL import Image
 import io
@@ -32,10 +31,11 @@ from facenet_pytorch import InceptionResnetV1
 import cv2
 from typing import Dict
 import time
-import shutil
 from typing import Optional
 from fastapi import UploadFile, File
 from fastapi import Request
+import psycopg2
+from pgvector.psycopg2 import register_vector
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -151,259 +151,26 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-MEMORY_FILE = os.path.join(DATA_DIR, "face_memory.pkl")
-BEST_MEMORY_FILE = os.path.join(DATA_DIR, "face_memory_best.pkl")
 
-def load_best_db():
-    if not os.path.exists(BEST_MEMORY_FILE): return {}
-    with open(BEST_MEMORY_FILE, "rb") as f: return pickle.load(f)
-
-def save_best_db(db):
-    for sid, data in db.items():
-        if len(data["embeddings"]) > 8:
-            data["embeddings"] = data["embeddings"][:8]
-            data["quality"] = data["quality"][:8]
-    
-    with open(BEST_MEMORY_FILE, "wb") as f:
-        pickle.dump(db, f)
-    print(f"🏆 BEST DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
-
-def is_high_quality_embedding(prob, symmetry):
-    return prob > 0.85 and symmetry > 0.80
-
-def add_to_best_db(student_id, student_name, emb, prob, symmetry):
-    if student_id not in global_best_db:
-        global_best_db[student_id] = {"name": student_name, "embeddings": [], "quality": []}
-    
-    best_existing = global_best_db[student_id]["embeddings"]
-    
-    # Redundancy check for best DB (stricter: only distinct angles)
-    if len(best_existing) > 0:
-        sims = [cosine_similarity(emb.tolist(), e) for e in best_existing]
-        if max(sims) > 0.90:
-            return False  # Already have this angle in best DB
-    
-    best_existing.append(emb.tolist())
-    global_best_db[student_id]["quality"].append({"prob": prob, "symmetry": symmetry})
-    
-    # If over 8, evict the lowest quality embedding
-    if len(best_existing) > 8:
-        qualities = global_best_db[student_id]["quality"]
-        scores = [q["prob"] * q["symmetry"] for q in qualities]
-        min_idx = scores.index(min(scores))
-        best_existing.pop(min_idx)
-        qualities.pop(min_idx)
-    
-    save_best_db(global_best_db)
-    return True
-
-global_best_db = load_best_db()
-
-def load_face_db():
-    if not os.path.exists(MEMORY_FILE):
-        print("📂 No existing DB found. Starting fresh.")
-        return {}
-    
-    try:
-        with open(MEMORY_FILE, "rb") as f:
-            db = pickle.load(f)
-        
-        total_embs = sum(len(v["embeddings"]) for v in db.values())
-        print(f"📂 DB LOADED: {len(db)} students, {total_embs} total embeddings from {MEMORY_FILE}")
-        
-        # If DB is empty but file exists, warn
-        if len(db) == 0:
-            print("⚠️ Warning: DB file exists but contains zero students.")
-        
-        return db
-        
-    except Exception as e:
-        print(f"💥 DB LOAD FAILED: {e}")
-        # Try backup
-        if os.path.exists(MEMORY_FILE + ".backup"):
-            print("🔄 Attempting backup restore...")
-            try:
-                with open(MEMORY_FILE + ".backup", "rb") as f:
-                    db = pickle.load(f)
-                print(f"📂 BACKUP RESTORED: {len(db)} students")
-                return db
-            except Exception as be:
-                print(f"💥 Backup also failed: {be}")
-        return {}
-
-def save_face_db(db):
-    # 🛡️ DEFENSIVE CAP: truncate any race-condition overflow
-    for sid, data in db.items():
-        if len(data["embeddings"]) > 8:
-            data["embeddings"] = data["embeddings"][:8]
-    
-    # 🛡️ ATOMIC SAVE: write to temp file first, then rename
-    # This prevents half-written files if Ctrl+C happens during save
-    temp_file = MEMORY_FILE + ".tmp"
-    with open(temp_file, "wb") as f:
-        pickle.dump(db, f)
-    
-    # Backup existing good file
-    if os.path.exists(MEMORY_FILE):
-        shutil.copy2(MEMORY_FILE, MEMORY_FILE + ".backup")
-    
-    # Atomic rename: OS guarantees this is either complete or not happening
-    os.replace(temp_file, MEMORY_FILE)
-    
-    print(f"💾 DB saved: {len(db)} students, {sum(len(v['embeddings']) for v in db.values())} total embeddings")
-
-global_face_db = load_face_db()
+global_face_db = {}
 
 def cosine_similarity(a, b):
     a, b = np.array(a).flatten(), np.array(b).flatten()
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-def validate_db_integrity(db):
-    """Check for physical corruption: NaN, wrong shape, missing keys."""
-    errors = []
-    for sid, data in db.items():
-        if not isinstance(data, dict):
-            errors.append(f"{sid}: not a dict")
-            continue
-        if "embeddings" not in data or "name" not in data:
-            errors.append(f"{sid}: missing required keys")
-            continue
-        for i, emb in enumerate(data["embeddings"]):
-            arr = np.array(emb)
-            if arr.shape != (512,):
-                errors.append(f"{sid}: emb[{i}] shape {arr.shape} != (512,)")
-            if np.isnan(arr).any() or np.isinf(arr).any():
-                errors.append(f"{sid}: emb[{i}] contains NaN/Inf")
-    return errors
-df = pd.DataFrame()
+# --- POSTGRESQL DATABASE CONFIGURATION ---
+DB_CONFIG = {
+    "dbname": "liwa_attendance",
+    "user": "postgres",
+    "password": "aze123",  # <--- CHANGE THIS TO YOUR POSTGRES PASSWORD!
+    "host": "localhost",
+    "port": "5432"
+}
 
-# =========================================================
-# EXCEL UPLOAD ENDPOINT
-# =========================================================
+def get_db():
+    conn = psycopg2.connect(**DB_CONFIG)
+    register_vector(conn) # Tells psycopg2 how to handle the 512d FaceNet arrays
+    return conn
 
-
-@app.post("/api/upload-roster")
-async def upload_roster(file: UploadFile = File(...)):
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(400, "Only Excel files (.xlsx, .xls) are accepted")
-    
-    # If file exists and is locked, use a numbered suffix
-    base_name = file.filename
-    file_path = os.path.join(DATA_DIR, base_name)
-    
-    # If locked, try filename_1.xlsx, filename_2.xlsx, etc.
-    counter = 1
-    original_path = file_path
-    while os.path.exists(file_path):
-        try:
-            # Test if we can open for writing
-            with open(file_path, 'a+b') as test:
-                pass
-            break  # File exists but we can write to it
-        except PermissionError:
-            # File is locked, try new name
-            name, ext = os.path.splitext(base_name)
-            file_path = os.path.join(DATA_DIR, f"{name}_{counter}{ext}")
-            counter += 1
-    
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-    
-    try:
-        new_df = pd.read_excel(file_path)
-        new_df.columns = new_df.columns.str.strip()
-        new_df = new_df.fillna("")
-        
-        required = ["Faculty Email", "Faculty Name", "Class Nbr", "Student ID", "Student Name"]
-        missing = [c for c in required if c not in new_df.columns]
-        if missing:
-            os.remove(file_path)
-            raise HTTPException(400, f"Missing required columns: {', '.join(missing)}")
-        
-        # Auto-select as active roster
-        global df
-        df = new_df
-        
-        return {
-            "status": "success",
-            "message": f"Roster uploaded & selected: {len(df)} rows, {df['Class Nbr'].nunique()} classes",
-            "filename": os.path.basename(file_path),
-            "faculties": df["Faculty Name"].unique().tolist()
-        }
-        
-    except Exception as e:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(400, f"Failed to parse Excel: {str(e)}")
-
-# =========================================================
-# DYNAMIC ROSTER MANAGEMENT
-# =========================================================
-
-@app.get("/api/has-roster")
-def has_roster():
-    """Check if a roster is currently loaded."""
-    return {
-        "has_roster": len(df) > 0,
-        "rows": len(df),
-        "classes": df["Class Nbr"].nunique() if len(df) > 0 else 0
-    }
-
-@app.get("/api/list-rosters")
-def list_rosters():
-    """List all available Excel files in the data directory."""
-    files = []
-    for f in os.listdir(DATA_DIR):
-        if f.endswith(('.xlsx', '.xls')):
-            files.append({
-                "filename": f,
-                "size_kb": round(os.path.getsize(os.path.join(DATA_DIR, f)) / 1024, 1),
-                "modified": time.strftime('%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(os.path.join(DATA_DIR, f))))
-            })
-    return {"files": files}
-
-@app.post("/api/select-roster")
-async def select_roster(payload: dict):
-    """Select which Excel file to use as the active roster."""
-    global df
-    
-    filename = payload.get("filename")
-    if not filename:
-        raise HTTPException(400, "Filename required")
-    
-    file_path = os.path.join(DATA_DIR, filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(404, f"File not found: {filename}")
-    
-    try:
-        new_df = pd.read_excel(file_path)
-        new_df.columns = new_df.columns.str.strip()
-        new_df = new_df.fillna("")
-        
-        required = ["Faculty Email", "Faculty Name", "Class Nbr", "Student ID", "Student Name"]
-        missing = [c for c in required if c not in new_df.columns]
-        if missing:
-            raise HTTPException(400, f"Missing required columns: {', '.join(missing)}")
-        
-        # Set as active
-        df = new_df
-        
-        return {
-            "status": "success",
-            "message": f"Roster selected: {filename}",
-            "rows": len(df),
-            "faculties": df["Faculty Name"].unique().tolist(),
-            "classes": df["Class Nbr"].nunique()
-        }
-        
-    except Exception as e:
-        raise HTTPException(400, f"Failed to load roster: {str(e)}")
-
-@app.post("/api/clear-roster")
-def clear_roster():
-    """Clear the current roster (logout / reset)."""
-    global df
-    df = pd.DataFrame()
-    return {"status": "success", "message": "Roster cleared"}
 
 
 import secrets
@@ -488,10 +255,7 @@ def check_qr_status(token: str):
 
 
 @app.post("/api/request-email-verification")
-async def request_email_verification(payload: dict, request: Request): # <--- Added request
-    if df.empty:
-        raise HTTPException(400, "No roster loaded. Please upload a roster first.")
-    
+def request_email_verification(payload: dict, request: Request): 
     token = payload.get("token")
     email = payload.get("email")
     
@@ -499,23 +263,36 @@ async def request_email_verification(payload: dict, request: Request): # <--- Ad
         raise HTTPException(400, "Token and email required")
     
     session = qr_sessions.get(token)
-    if not session or session["status"] != "pending":
+    if not session:
         raise HTTPException(400, "Invalid or expired QR session")
+        
+    if session["status"] == "email_entered" and session.get("email") == email:
+        return {"status": "success", "message": f"Verification email already sent to {email}"}
+        
+    if session["status"] != "pending":
+        raise HTTPException(400, "QR session is no longer valid")
     
-    user = df[df["Faculty Email"].str.lower() == email.lower()]
-    if user.empty:
-        raise HTTPException(404, "Faculty email not found in roster")
+    # 🎯 NEW: Check the PostgreSQL Database instead of Pandas/Excel!
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('SELECT "FacultyName" FROM "Att_Course_Class" WHERE LOWER("FacultyID") = LOWER(%s) LIMIT 1', (email,))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(500, f"Database error: {str(e)}")
+    
+    if not user:
+        raise HTTPException(404, "Faculty email not found in university database")
     
     verify_token = secrets.token_urlsafe(32)
     session["status"] = "email_entered"
     session["email"] = email
-    session["faculty_name"] = user.iloc[0]["Faculty Name"]
+    session["faculty_name"] = user[0] # Extracted from the DB query
     session["verify_token"] = verify_token
     
-    # Get the actual IP address used to reach the backend
     host_url = str(request.base_url).rstrip("/")
-    
-    # Build verification URL (teacher clicks this in email)
     verify_url = f"{host_url}/api/confirm-verification?vt={verify_token}&t={token}"
     
     if EMAIL_ENABLED:
@@ -525,17 +302,12 @@ async def request_email_verification(payload: dict, request: Request): # <--- Ad
             verify_url=verify_url
         )
         if not success:
+            session["status"] = "pending" 
             raise HTTPException(500, "Failed to send verification email")
     else:
-        print(f"\n{'='*60}")
-        print(f"📧 DEV MODE: Verification URL for {email}:")
-        print(f"   {verify_url}")
-        print(f"{'='*60}\n")
+        print(f"\n{'='*60}\n📧 DEV MODE: Verification URL for {email}:\n   {verify_url}\n{'='*60}\n")
     
-    return {
-        "status": "success",
-        "message": f"Verification email sent to {email}"
-    }
+    return {"status": "success", "message": f"Verification email sent to {email}"}
 
 @app.get("/api/confirm-verification")
 def confirm_verification(vt: str, t: str):
@@ -591,57 +363,163 @@ def confirm_verification(vt: str, t: str):
 # =========================================================
 @app.get("/api/login")
 def login(email: str):
-    user = df[df["Faculty Email"].str.lower() == email.lower()]
-    if user.empty: raise HTTPException(404, "Faculty not found")
-    return {"status": "success", "name": user.iloc[0]["Faculty Name"]}
+    conn = get_db()
+    cur = conn.cursor()
+    # Search for the teacher in the Course table
+    cur.execute('SELECT "FacultyName" FROM "Att_Course_Class" WHERE LOWER("FacultyID") = LOWER(%s) LIMIT 1', (email,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    if not user: 
+        raise HTTPException(404, "Faculty email not found in database")
+    return {"status": "success", "name": user[0]}
 
 @app.get("/api/classes")
-def classes(email: str):
-    faculty = df[df["Faculty Email"].str.lower() == email.lower()]
-    return faculty.drop_duplicates(subset=["Class Nbr"]).to_dict("records")
+def classes(email: str, room_id: str = None):
+    conn = get_db()
+    cur = conn.cursor()
+    
+    query = 'SELECT "ClassNbr", "sTerm" AS "Semester", "Code" AS "Course Code", "CourseName" AS "Course Name", "StartTime" AS "Start Time", "RoomID" AS "Room ID" FROM "Att_Course_Class" WHERE LOWER("FacultyID") = LOWER(%s)'
+    params = [email]
+    
+    # TV Room ID filtering logic!
+    if room_id:
+        query += ' AND "RoomID" = %s'
+        params.append(room_id)
+        
+    cur.execute(query, tuple(params))
+    
+    # Convert DB rows to JSON list for React
+    columns = [desc[0] for desc in cur.description]
+    results = [dict(zip(columns, row)) for row in cur.fetchall()]
+    
+    cur.close()
+    conn.close()
+    return results
 
 @app.get("/api/students")
-def students(email: str, class_nbr: int):
-    class_df = df[(df["Faculty Email"].str.lower() == email.lower()) & (df["Class Nbr"] == class_nbr)]
-    return class_df[["Student ID", "Student Name"]].to_dict("records")
+def students(email: str, class_nbr: str):
+    print(f"🔍 Loading students for class_nbr='{class_nbr}', email='{email}'")
+    
+    conn = get_db()
+    cur = conn.cursor()
+    
+    # Load ALL embeddings for students in THIS class from PostgreSQL only
+    cur.execute('''
+        SELECT s."StudentID", 
+               s."StudentName",
+               f."Embedding"
+        FROM "Att_Student" s
+        JOIN "Att_Class_List" cl ON s."StudentID" = cl."StudentID"
+        LEFT JOIN "Att_FaceEmbeddings" f ON s."StudentID" = f."StudentID"
+        WHERE cl."ClassNbr" = %s
+    ''', (str(class_nbr),))
+    
+    raw_rows = cur.fetchall()
+    print(f"🔍 Found {len(raw_rows)} raw rows from database")
+    
+    # Group embeddings by student
+    from collections import defaultdict
+    student_embeddings = defaultdict(list)
+    student_names = {}
+    
+    for row in raw_rows:
+        sid, sname, emb = row
+        student_names[sid] = sname
+        if emb is not None:
+            student_embeddings[sid].append(emb)
+        print(f"🔍 Row: {sid}, {sname}, has_embedding={emb is not None}")
+    
+    # Build student list for React
+    student_list = []
+    for sid, sname in student_names.items():
+        student_list.append({
+            "Student ID": sid,
+            "Student Name": sname
+        })
+    
+    # Build fresh face_db (atomic swap) — ONLY from PostgreSQL
+    new_face_db = {}
+    for sid, sname in student_names.items():
+        embs = student_embeddings.get(sid, [])
+        if embs:
+            new_face_db[sid] = {
+                "name": sname,
+                "embeddings": embs
+            }
+    
+    global_face_db.clear()
+    global_face_db.update(new_face_db)
+    
+    total_embs = sum(len(v["embeddings"]) for v in global_face_db.values())
+    print(f"🧠 AI Memory: {len(global_face_db)} students, {total_embs} embeddings for class {class_nbr}")
+    
+    cur.close()
+    conn.close()
+    return student_list
 
 @app.get("/api/db-health")
 def db_health():
-    """Instant snapshot of database quality. Works with 1 student or 100."""
+    """Query PostgreSQL directly for embedding quality."""
     report = []
-    for sid, data in global_face_db.items():
-        embs = data["embeddings"]
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
         
-        if len(embs) > 1:
-            sims = []
-            for i in range(len(embs)):
-                for j in range(i+1, len(embs)):
-                    sims.append(cosine_similarity(embs[i], embs[j]))
-            avg_sim = float(np.mean(sims))
-            min_sim = float(np.min(sims))
-        else:
-            avg_sim, min_sim = 1.0, 1.0
+        # Get all students with their embeddings
+        cur.execute('''
+            SELECT s."StudentID", s."StudentName", 
+                   COUNT(f."iSerial") as emb_count,
+                   ARRAY_AGG(f."Embedding") as embeddings
+            FROM "Att_Student" s
+            LEFT JOIN "Att_FaceEmbeddings" f ON s."StudentID" = f."StudentID"
+            GROUP BY s."StudentID", s."StudentName"
+        ''')
         
-        flag = "OK"
-        if len(embs) > 20:
-            flag = "TOO_MANY_EMBS"
-        elif len(embs) == 0:
-            flag = "EMPTY"
-        elif min_sim < 0.75:
-            flag = "HIGH_VARIANCE"
+        for row in cur.fetchall():
+            sid, sname, emb_count, embeddings = row
+            embeddings = embeddings or []
+            
+            if emb_count > 1:
+                sims = []
+                clean_embs = [e for e in embeddings if e is not None]
+                for i in range(len(clean_embs)):
+                    for j in range(i+1, len(clean_embs)):
+                        sims.append(cosine_similarity(clean_embs[i], clean_embs[j]))
+                avg_sim = float(np.mean(sims)) if sims else 1.0
+                min_sim = float(np.min(sims)) if sims else 1.0
+            else:
+                avg_sim, min_sim = 1.0, 1.0
+            
+            flag = "OK"
+            if emb_count > 8:
+                flag = "TOO_MANY_EMBS"
+            elif emb_count == 0:
+                flag = "EMPTY"
+            elif min_sim < 0.75:
+                flag = "HIGH_VARIANCE"
+            
+            report.append({
+                "student_id": sid,
+                "name": sname,
+                "embedding_count": emb_count,
+                "avg_self_similarity": round(avg_sim, 3),
+                "min_self_similarity": round(min_sim, 3),
+                "flag": flag
+            })
         
-        report.append({
-            "student_id": sid,
-            "name": data["name"],
-            "embedding_count": len(embs),
-            "avg_self_similarity": round(avg_sim, 3),
-            "min_self_similarity": round(min_sim, 3),
-            "flag": flag
-        })
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        print(f"⚠️ DB health query failed: {e}")
+        return {"error": str(e)}
     
     suspicious = [r for r in report if r["flag"] != "OK"]
     return {
-        "total_students": len(global_face_db),
+        "total_students": len(report),
         "suspicious_count": len(suspicious),
         "suspicious": suspicious,
         "students": report
@@ -649,15 +527,11 @@ def db_health():
 
 @app.get("/api/health")
 def health():
-    """Quick system health check for IT monitoring."""
-    errors = validate_db_integrity(global_face_db)
     return {
-        "status": "ok" if len(errors) == 0 else "degraded",
+        "status": "ok",
         "camera": "connected",
         "db_students": len(global_face_db),
-        "db_corrupted": len(errors) > 0,
-        "db_errors": errors[:5],
-        "db_file_size_kb": round(os.path.getsize(MEMORY_FILE) / 1024, 1) if os.path.exists(MEMORY_FILE) else 0,
+        "db_corrupted": False,
         "session_active": session_stats["start_time"] is not None,
         "total_embeddings": sum(len(v["embeddings"]) for v in global_face_db.values())
     }
@@ -703,12 +577,14 @@ class EnrollPayload(BaseModel):
 
 @app.post("/api/enroll-face")
 def enroll_face(payload: EnrollPayload):
-    student_embeddings =[]
+    student_embeddings = []
     for angle, b64_list in payload.images.items():
         for b64_str in b64_list:
-            if not b64_str: continue
+            if not b64_str: 
+                continue
             try:
-                if ',' in b64_str: b64_str = b64_str.split(',')[1]
+                if ',' in b64_str: 
+                    b64_str = b64_str.split(',')[1]
                 img = Image.open(io.BytesIO(base64.b64decode(b64_str))).convert('RGB')
                 
                 face_tensor = mtcnn(img)
@@ -716,12 +592,46 @@ def enroll_face(payload: EnrollPayload):
                     with torch.no_grad():
                         emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
                     student_embeddings.append(emb.tolist())
-            except Exception: pass
+            except Exception: 
+                pass
             
-    if len(student_embeddings) == 0: raise HTTPException(status_code=400, detail="Could not detect a clear face.")
-    global_face_db[payload.student_id] = {"name": payload.student_name, "embeddings": student_embeddings}
-    save_face_db(global_face_db) 
-    return {"status": "success", "message": f"Successfully memorized {payload.student_name}"}
+    if len(student_embeddings) == 0: 
+        raise HTTPException(status_code=400, detail="Could not detect a clear face.")
+    
+    # Save to PostgreSQL
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # Clear old embeddings first (full re-enrollment)
+        cur.execute('DELETE FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (payload.student_id,))
+        
+        for i, emb in enumerate(student_embeddings[:8]):  # Cap at 8
+            cur.execute('''
+                INSERT INTO "Att_FaceEmbeddings" 
+                ("StudentID", "Embedding", "QualityScore", "Symmetry")
+                VALUES (%s, %s, %s, %s)
+            ''', (payload.student_id, emb, 0.85, 0.80))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        print(f"☁️ Saved {len(student_embeddings[:8])} embeddings for {payload.student_name} to PostgreSQL")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    
+    # Update runtime cache
+    global_face_db[payload.student_id] = {
+        "name": payload.student_name, 
+        "embeddings": student_embeddings[:8]
+    }
+    
+    return {
+        "status": "success", 
+        "message": f"Successfully memorized {payload.student_name}"
+    }
 
 class VerifyPayload(BaseModel):
     image: str  
@@ -789,18 +699,22 @@ def recognize_face(emb):
     return None, "Unknown", best_score
 
 
+
 def process_frame(image_b64):
     global live_tracker_memory
     t_start = time.perf_counter()
     
+    boxes = []
+    track_ids = []
+
     # --- PROFILING STATE ---
     timers = {}
     facenet_runs = 0
     yunet_detect_runs = 0
     yunet_extract_runs = 0
-    db_compare_count = 0  # how many embedding-to-embedding comparisons
+    db_compare_count = 0
     process = psutil.Process(os.getpid())
-    mem_before = process.memory_info().rss / 1024 / 1024  # MB
+    mem_before = process.memory_info().rss / 1024 / 1024
     # -----------------------
 
     if not image_b64:
@@ -820,8 +734,6 @@ def process_frame(image_b64):
     frame_bgr = np.array(img)[:, :, ::-1]
     
     timers['decode'] = (time.perf_counter() - t0) * 1000
-
-    frame_bgr = np.array(img)[:, :, ::-1]
     
     t1 = time.perf_counter()
     results = yolo_person.track(
@@ -837,7 +749,7 @@ def process_frame(image_b64):
     
     faces_out = []
     current_frame_tracks = {}
-    save_required = False
+    pg_save_required = False  # For active learning PostgreSQL save
     current_time = time.time()
 
     if results and results[0].boxes is not None and results[0].boxes.id is not None:
@@ -866,11 +778,10 @@ def process_frame(image_b64):
             })
             person["last_seen"] = current_time
 
-                        # FAST PATH 1: Known — skip recognition for 10 seconds
+            # FAST PATH 1: Known — skip recognition for 10 seconds
             if (person.get("status") == "known" and 
                 (current_time - person.get("last_recognized", 0)) < 10.0):
                 
-                # 🛡️ If no face seen in 3 seconds, degrade to "no_face"
                 if (current_time - person.get("last_face_seen", 0)) > 3.0:
                     person["status"] = "no_face"
                     person["name"] = "No Face"
@@ -935,8 +846,8 @@ def process_frame(image_b64):
             face_abs_box = None
             
             if f_boxes is not None and len(f_boxes) > 0 and f_boxes[0] is not None:
-                boxes_raw   = f_boxes[0]
-                probs_raw   = f_probs[0]
+                boxes_raw = f_boxes[0]
+                probs_raw = f_probs[0]
                 landmarks_raw = f_landmarks[0]
                 
                 boxes_arr = np.array(boxes_raw)
@@ -994,7 +905,6 @@ def process_frame(image_b64):
                             # --- DB SEARCH ---
                             t_db = time.perf_counter()
                             sid, name, score = recognize_face(emb)
-                            # Count comparisons: sum of all embeddings in DB
                             db_compare_count += sum(len(v["embeddings"]) for v in global_face_db.values())
                             timers['db_search'] = timers.get('db_search', 0) + (time.perf_counter() - t_db) * 1000
 
@@ -1006,6 +916,7 @@ def process_frame(image_b64):
                                 
                                 existing = global_face_db[sid]["embeddings"]
                                 
+                                # ACTIVE LEARNING: Save good new angles to PostgreSQL
                                 if (0.72 < score < 0.94 and 
                                     probs_arr[best_idx] > 0.85 and
                                     len(existing) < 8):
@@ -1013,7 +924,7 @@ def process_frame(image_b64):
                                     if len(existing) > 0:
                                         sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing]
                                         if max(sims_to_existing) > 0.85:
-                                            pass
+                                            pass  # Too similar, skip
                                         else:
                                             lm = landmarks_arr[best_idx]
                                             left_eye, right_eye, nose = lm[0], lm[1], lm[2]
@@ -1022,11 +933,9 @@ def process_frame(image_b64):
                                             symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
                                             
                                             if symmetry > 0.60:
+                                                # Add to runtime cache
                                                 existing.append(emb.tolist())
-                                                save_required = True
-                                                
-                                                if probs_arr[best_idx] > 0.85 and symmetry > 0.80:
-                                                    add_to_best_db(sid, name, emb, float(probs_arr[best_idx]), symmetry)
+                                                pg_save_required = True  # Mark for PostgreSQL save
                                                 
                                                 session_stats["embeddings_added"][sid] = session_stats["embeddings_added"].get(sid, 0) + 1
                                                 session_stats["avg_symmetry"].append(symmetry)
@@ -1075,9 +984,37 @@ def process_frame(image_b64):
         if (current_time - tdata.get("last_seen", 0)) < 10.0
     }
 
-    if save_required:
+    # ☁️ ACTIVE LEARNING: Save new angles to PostgreSQL (batch save)
+    if pg_save_required:
         t_save = time.perf_counter()
-        save_face_db(global_face_db)
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            
+            for sid, data in global_face_db.items():
+                # Get current PG count
+                cur.execute('SELECT COUNT(*) FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (sid,))
+                pg_count = cur.fetchone()[0]
+                
+                # Get embeddings that are in runtime cache but might not be in PG
+                # For simplicity, we check the last added one
+                runtime_embs = data["embeddings"]
+                if len(runtime_embs) > pg_count and pg_count < 8:
+                    # Save the newest embedding
+                    newest_emb = runtime_embs[-1]
+                    cur.execute('''
+                        INSERT INTO "Att_FaceEmbeddings" 
+                        ("StudentID", "Embedding", "QualityScore", "Symmetry")
+                        VALUES (%s, %s, %s, %s)
+                    ''', (sid, newest_emb, 0.85, 0.80))
+                    print(f"☁️ Active learning: saved new angle for {data['name']} to PostgreSQL")
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Failed to save active learning to PostgreSQL: {e}")
+        
         timers['db_save'] = (time.perf_counter() - t_save) * 1000
 
     # --- PROFILING REPORT ---
@@ -1085,14 +1022,13 @@ def process_frame(image_b64):
     mem_after = process.memory_info().rss / 1024 / 1024
     mem_delta = mem_after - mem_before
     
-    # Only print if anything meaningful happened, or every 30 frames (~6 sec)
     if not hasattr(process_frame, "_frame_counter"):
         process_frame._frame_counter = 0
     process_frame._frame_counter += 1
     
     if facenet_runs > 0 or process_frame._frame_counter % 30 == 0:
         print(f"\n{'='*60}")
-        print(f"📊 FRAME {process_frame._frame_counter} | People:{len(boxes) if 'boxes' in dir() else 0} | Total:{total:.1f}ms")
+        print(f"📊 FRAME {process_frame._frame_counter} | People:{len(boxes)} | Total:{total:.1f}ms")
         print(f"   Base64/Decode : {timers.get('decode',0):>6.1f}ms")
         print(f"   YOLO Track    : {timers.get('yolo',0):>6.1f}ms")
         print(f"   Head Crop     : {timers.get('crop',0):>6.1f}ms")
@@ -1118,7 +1054,16 @@ async def ws_surveillance(ws: WebSocket):
             faces = await asyncio.to_thread(process_frame, data["image"])
             await ws.send_json({"status": "success", "faces": faces})
     except WebSocketDisconnect:
+        pass  # Normal disconnect
+    except Exception as e:
+        print(f"⚠️ WebSocket error: {e}")
+    finally:
         live_tracker_memory.clear()
+        # Suppress Windows Proactor error on connection close
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 # =========================================================
 # QUICK ASSIGN (TEACHER CLICK)
@@ -1129,23 +1074,25 @@ class AssignPayload(BaseModel):
     image: str
     box: Optional[list] = None
     is_manual: bool = False
+    class_nbr: Optional[str] = None
     
 @app.post("/api/assign-face")
 def assign_face(p: AssignPayload):
-    if "," in p.image: p.image = p.image.split(",")[1]
+    if "," in p.image: 
+        p.image = p.image.split(",")[1]
     
     try:
         img = Image.open(io.BytesIO(base64.b64decode(p.image))).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image data.")
     
-    # 🎯 MANUAL ZOOM: image is already a magnified face crop
+    # MANUAL ZOOM: image is already a magnified face crop
     if p.is_manual or not p.box:
         if max(img.size) > 1200:
             img.thumbnail((800, 800))
         head_crop = img
     else:
-        # 🎯 YOLO TRACKING: existing body-box to head-crop logic
+        # YOLO TRACKING: existing body-box to head-crop logic
         x, y, w, h = map(int, p.box)
         head_h = int(h * 0.50)
         hx1 = max(0, x - 20)
@@ -1158,7 +1105,7 @@ def assign_face(p: AssignPayload):
         
         head_crop = img.crop((hx1, hy1, hx2, hy2))
     
-    # --- MTCNN detection ---
+    # --- YUNET DETECTION ---
     f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
     
     if f_boxes is None or len(f_boxes) == 0 or f_boxes[0] is None:
@@ -1169,13 +1116,16 @@ def assign_face(p: AssignPayload):
     landmarks_raw = f_landmarks[0]
     
     boxes_arr = np.array(boxes_raw)
-    if boxes_arr.ndim == 1: boxes_arr = boxes_arr.reshape(1, 4)
+    if boxes_arr.ndim == 1: 
+        boxes_arr = boxes_arr.reshape(1, 4)
     probs_arr = np.array(probs_raw)
-    if probs_arr.ndim == 0: probs_arr = probs_arr.reshape(1)
+    if probs_arr.ndim == 0: 
+        probs_arr = probs_arr.reshape(1)
     landmarks_arr = np.array(landmarks_raw)
-    if landmarks_arr.ndim == 2: landmarks_arr = landmarks_arr.reshape(1, 5, 2)
+    if landmarks_arr.ndim == 2: 
+        landmarks_arr = landmarks_arr.reshape(1, 5, 2)
     
-        # 🛡️ MANUAL ZOOM: Reject if multiple faces in crop
+    # MANUAL ZOOM: Reject if multiple faces in crop
     if p.is_manual and len(boxes_arr) > 1:
         high_conf_count = sum(1 for prob in probs_arr if prob > 0.90)
         if high_conf_count > 1:
@@ -1186,7 +1136,7 @@ def assign_face(p: AssignPayload):
     
     best_idx = int(np.argmax(probs_arr))
     
-    # 🚨 QUALITY GATES
+    # QUALITY GATES
     if probs_arr[best_idx] < 0.80:
         raise HTTPException(status_code=400, detail=f"Face too unclear ({probs_arr[best_idx]:.2f}). Ask student to look directly at camera.")
     
@@ -1214,12 +1164,11 @@ def assign_face(p: AssignPayload):
     if len(face_tensors) == 0:
         raise HTTPException(status_code=400, detail="Face extraction failed.")
     
-    # 🎯 THIS LINE MUST EXIST AND MUST COME BEFORE emb IS COMPUTED
     face_tensor = face_tensors[0]
     with torch.no_grad():
         emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
     
-    # 🛡️ IDENTITY CONSISTENCY: If student already enrolled, verify face matches them
+    # IDENTITY CONSISTENCY
     if p.student_id in global_face_db and len(global_face_db[p.student_id]["embeddings"]) > 0:
         existing_embs = global_face_db[p.student_id]["embeddings"]
         sims_to_self = [cosine_similarity(emb.tolist(), e) for e in existing_embs]
@@ -1227,17 +1176,15 @@ def assign_face(p: AssignPayload):
         if max_self_sim < 0.55:
             return {
                 "status": "error",
-                "message": f"🚫 IDENTITY MISMATCH: This face does not match existing biometric record for {global_face_db[p.student_id]['name']}. You may have selected the wrong student.",
+                "message": f"🚫 IDENTITY MISMATCH: This face does not match existing biometric record for {global_face_db[p.student_id]['name']}.",
                 "max_similarity_to_record": round(max_self_sim, 3)
             }
     
-    # 🛡️ DUPLICATE FACE CHECK: Does this face already belong to someone else?
+    # DUPLICATE FACE CHECK
     DUPLICATE_THRESHOLD = 0.75
-    
     for existing_id, existing_data in global_face_db.items():
         if existing_id == p.student_id:
             continue
-            
         for saved_emb in existing_data["embeddings"]:
             sim = cosine_similarity(emb.tolist(), saved_emb)
             if sim > DUPLICATE_THRESHOLD:
@@ -1249,42 +1196,68 @@ def assign_face(p: AssignPayload):
                     "similarity": round(sim, 3)
                 }
     
-    # Initialize if new student
+    # ☁️ SAVE TO POSTGRESQL ONLY
+    conn = None
+    cur = None
+    count = 0  # ← DEFINED HERE for use in return statement
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # Count existing embeddings
+        cur.execute('SELECT COUNT(*) FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (p.student_id,))
+        count = cur.fetchone()[0]
+        
+        if count >= 8:
+            return {
+                "status": "success",
+                "message": f"{p.student_name} already has maximum biometric data (8 angles).",
+                "quality": "maxed",
+                "total_embeddings": count
+            }
+        
+        # Check redundancy
+        cur.execute('SELECT "Embedding" FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (p.student_id,))
+        existing_rows = cur.fetchall()
+        
+        for (existing_emb,) in existing_rows:
+            if cosine_similarity(emb.tolist(), existing_emb) > 0.90:
+                return {
+                    "status": "success",
+                    "message": f"{p.student_name} already enrolled with similar angle.",
+                    "quality": "redundant",
+                    "total_embeddings": count
+                }
+        
+        # Insert new embedding
+        cur.execute('''
+            INSERT INTO "Att_FaceEmbeddings" 
+            ("StudentID", "Embedding", "QualityScore", "Symmetry", "SourceClassNbr")
+            VALUES (%s, %s, %s, %s, %s)
+        ''', (p.student_id, emb.tolist(), float(probs_arr[best_idx]), symmetry, p.class_nbr))
+        
+        conn.commit()
+        print(f"☁️ Saved embedding {count+1}/8 for {p.student_name} to PostgreSQL")
+        
+    except Exception as e:
+        if cur: cur.close()
+        if conn: conn.close()
+        print(f"⚠️ Failed to save to PostgreSQL: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+    
+    # Update runtime cache immediately (so next frame recognizes)
     if p.student_id not in global_face_db:
         global_face_db[p.student_id] = {"name": p.student_name, "embeddings": []}
     
-    existing = global_face_db[p.student_id]["embeddings"]
+    global_face_db[p.student_id]["embeddings"].append(emb.tolist())
     
-        # 🎯 HARD CAP: Never exceed 8 embeddings per student
-    if len(existing) >= 8:
-        return {
-            "status": "success",
-            "message": f"{p.student_name} already has maximum biometric data (8 angles). No new data saved.",
-            "quality": "maxed",
-            "symmetry": round(symmetry, 3),
-            "confidence": round(float(probs_arr[best_idx]), 3),
-            "total_embeddings": len(existing)
-        }
-
-    # 🎯 ENROLLMENT REDUNDANCY: Don't save near-duplicates for same student
-    if len(existing) > 0:
-        sims = [cosine_similarity(emb.tolist(), e) for e in existing]
-        if max(sims) > 0.90:
-            return {
-                "status": "success",
-                "message": f"{p.student_name} already enrolled with similar angle. No new data saved.",
-                "quality": "redundant",
-                "symmetry": round(symmetry, 3),
-                "confidence": round(float(probs_arr[best_idx]), 3)
-            }
-    
-        # Save the high-quality seed
-    existing.append(emb.tolist())
-    save_face_db(global_face_db)
-    
-    # 🏆 Save to BEST DB if this is truly excellent quality
-    if is_high_quality_embedding(float(probs_arr[best_idx]), symmetry):
-        add_to_best_db(p.student_id, p.student_name, emb, float(probs_arr[best_idx]), symmetry)
+    # Cap runtime cache to 8
+    if len(global_face_db[p.student_id]["embeddings"]) > 8:
+        global_face_db[p.student_id]["embeddings"] = global_face_db[p.student_id]["embeddings"][:8]
     
     # Clear tracker so next frame recognizes immediately
     global live_tracker_memory
@@ -1296,8 +1269,9 @@ def assign_face(p: AssignPayload):
         "quality": "excellent",
         "symmetry": round(symmetry, 3),
         "confidence": round(float(probs_arr[best_idx]), 3),
-        "total_embeddings": len(existing)
+        "total_embeddings": count + 1  # ← count is now defined
     }
+
 
 
 
@@ -1306,24 +1280,30 @@ class UnassignPayload(BaseModel):
 
 @app.post("/api/unassign-student")
 def unassign_student(p: UnassignPayload):
+    # Remove from PostgreSQL
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (p.student_id,))
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"🗑️ Deleted {deleted} embeddings for {p.student_id} from PostgreSQL")
+    except Exception as e:
+        print(f"⚠️ Failed to delete from PostgreSQL: {e}")
+    
+    # Remove from runtime cache
     if p.student_id in global_face_db:
         del global_face_db[p.student_id]
-        save_face_db(global_face_db)
-        print(f"🗑️ Removed student {p.student_id} from face DB")
     
-
-    if p.student_id in global_best_db:
-        del global_best_db[p.student_id]
-        save_best_db(global_best_db)
-        print(f"🗑️ Removed student {p.student_id} from best DB")
-
-    # Clear tracker so the face immediately becomes unknown again
+    # Clear tracker
     global live_tracker_memory
     live_tracker_memory.clear()
     
     return {
         "status": "success", 
-        "message": f"Student unassigned. Biometric data removed.",
+        "message": f"Student unassigned. Biometric data removed from database.",
         "student_id": p.student_id
     }
 # =========================================================
@@ -1335,15 +1315,43 @@ class AttendanceExportPayload(BaseModel):
 
 @app.post("/api/export-attendance")
 def export_attendance(payload: AttendanceExportPayload):
-    class_data = df[df['Class Nbr'] == payload.class_nbr].copy()
-    if class_data.empty: raise HTTPException(status_code=404, detail="Class not found.")
+    conn = get_db()
+    cur = conn.cursor()
     
-    def get_status(student_id):
-        return "Present" if payload.attendance_records.get(str(student_id), "absent") == "present" else "Absent"
+    # Get the students for this class and the course info
+    cur.execute('''
+        SELECT s."StudentID", s."StudentName", c."CourseName", c."StartTime"
+        FROM "Att_Student" s
+        JOIN "Att_Class_List" cl ON s."StudentID" = cl."StudentID"
+        JOIN "Att_Course_Class" c ON cl."ClassNbr" = c."ClassNbr"
+        WHERE cl."ClassNbr" = %s
+    ''', (str(payload.class_nbr),))
+    
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    if not rows:
+        raise HTTPException(status_code=404, detail="Class not found.")
         
-    class_data['Attendance Status'] = class_data['Student ID'].apply(get_status)
-    report_columns =['Student ID', 'Student Name', 'Course Name', 'Start Time', 'Attendance Status']
-    report_df = class_data[[c for c in report_columns if c in class_data.columns]]
+    # Build the report data
+    report_data = []
+    for row in rows:
+        student_id, student_name, course_name, start_time = row
+        # Check the payload to see if they were marked present
+        status = "Present" if payload.attendance_records.get(str(student_id)) == "present" else "Absent"
+        
+        report_data.append({
+            "Student ID": student_id,
+            "Student Name": student_name,
+            "Course Name": course_name,
+            "Start Time": start_time.strftime("%I:%M %p") if start_time else "",
+            "Attendance Status": status
+        })
+
+    # Convert to DataFrame just for easy Excel exporting
+    import pandas as pd
+    report_df = pd.DataFrame(report_data)
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:

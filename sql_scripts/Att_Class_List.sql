@@ -1,0 +1,22 @@
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[Att_Class_List](
+	[iSerial] [int] IDENTITY(1,1) NOT NULL,
+	[StudentID] [varchar](50) NULL,
+	[ClassNbr] [varchar](50) NULL,
+	[ClassID] [varchar](50) NULL,
+	[RegistrationDate] [datetime] NULL,
+	[iTerm] [int] NULL,
+ CONSTRAINT [PK_Att_Class_List] PRIMARY KEY CLUSTERED 
+(
+	[iSerial] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+

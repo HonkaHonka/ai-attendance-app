@@ -27,14 +27,9 @@ function App() {
   // ==========================================
   // STATE
   // ==========================================
-  const [view, setView] = useState('upload');  // ← Changed from 'login' to 'upload'
+  const [view, setView] = useState('login');  // ← Changed from 'login' to 'upload'
   const [email, setEmail] = useState('');
   const [facultyName, setFacultyName] = useState('');
-  const [rosterUploaded, setRosterUploaded] = useState(false);
-  const [availableRosters, setAvailableRosters] = useState([]);
-  const [selectedRosterFile, setSelectedRosterFile] = useState('');
-  const [uploadError, setUploadError] = useState('');
-  const [isDragging, setIsDragging] = useState(false);
   const [classes, setClasses] = useState([]);
   const [students, setStudents] = useState([]);
   const [selectedClass, setSelectedClass] = useState('');
@@ -42,9 +37,6 @@ function App() {
   const [isUpdateMode, setIsUpdateMode] = useState(false);
   // REMOVED: isModalOpen, enrollStep, capturedImages, isCapturing — live feed only
   
-  const [isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
-  const [verifyResult, setVerifyResult] = useState('');
-  const [verifyingStudent, setVerifyingStudent] = useState(null); 
   const [attendanceRecords, setAttendanceRecords] = useState({}); 
 
   const [isSurveillanceActive, setIsSurveillanceActive] = useState(false);
@@ -58,7 +50,7 @@ function App() {
   const [dbHealth, setDbHealth] = useState(null);
   
   // REFS
-  const webcamRef = useRef(null);
+  
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const surveillanceWebcamRef = useRef(null); 
@@ -111,20 +103,15 @@ function App() {
     } catch (err) { setError(err.message); }
   };
 const handleLogout = async () => {
-  try {
-    await fetch(`${API_BASE}/clear-roster`, { method: 'POST' });
-  } catch (err) {
-    console.error("Logout error:", err);
-  }
   setEmail('');
   setFacultyName('');
   setClasses([]);
   setStudents([]);
   setSelectedClass('');
   setAttendanceRecords({});
-  setRosterUploaded(false);
-  setView('upload');
+  setView('login'); // <-- CHANGE FROM 'upload' TO 'login'
   stopSurveillance();
+  
   if (window._qrPollInterval) {
     clearInterval(window._qrPollInterval);
     window._qrPollInterval = null;
@@ -137,57 +124,7 @@ const handleLogout = async () => {
 // ==========================================
   // ROSTER UPLOAD HANDLERS
   // ==========================================
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
-
-  const handleDrop = async (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const files = e.dataTransfer.files;
-    if (files && files.length > 0) {
-      await uploadRosterFile(files[0]);
-    }
-  };
-
-  const handleFileSelect = async (e) => {
-    const files = e.target.files;
-    if (files && files.length > 0) {
-      await uploadRosterFile(files[0]);
-    }
-    // Reset the input so the same file can be uploaded again if needed
-    e.target.value = null; 
-  };
-
-  const uploadRosterFile = async (file) => {
-    setUploadError('');
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    try {
-      const res = await fetch(`${API_BASE}/upload-roster`, {
-        method: 'POST',
-        body: formData
-      });
-      
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Upload failed');
-      
-      setRosterUploaded(true);
-      fetchAvailableRosters(); // Refresh the list
-      setView('login');        // Move to the QR login screen!
-      alert(`✅ ${data.message}`);
-      
-    } catch (err) {
-      setUploadError(`Upload Error: ${err.message}`);
-    }
-  };
+  
   const fetchClasses = async (generateQRuserEmail) => {
     try {
       const res = await fetch(`${API_BASE}/classes?email=${encodeURIComponent(generateQRuserEmail)}`);
@@ -199,13 +136,18 @@ const handleLogout = async () => {
 
   const fetchStudents = async (classNbr) => {
     try {
-      const res = await fetch(`${API_BASE}/students?email=${encodeURIComponent(email)}&class_nbr=${classNbr}`);
-      setStudents(await res.json());
-      setSelectedClass(classNbr);
-      setAttendanceRecords({}); 
-      setView('students');
-    } catch (err) { alert("Error loading students"); }
-  };
+        const res = await fetch(`${API_BASE}/students?email=${encodeURIComponent(email)}&class_nbr=${classNbr}`);
+        const data = await res.json();
+        console.log("🔍 FRONTEND RECEIVED:", data, "Length:", data.length);  // ADD THIS
+        setStudents(data);
+        setSelectedClass(classNbr);
+        setAttendanceRecords({}); 
+        setView('students');
+    } catch (err) { 
+        console.error("🔍 FRONTEND ERROR:", err);  // ADD THIS
+        alert("Error loading students"); 
+    }
+};
 
   const downloadAttendanceReport = async () => {
     try {
@@ -226,32 +168,6 @@ const handleLogout = async () => {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (error) { alert(`Error downloading report: ${error.message}`); }
-  };
-
-  const runVerificationScan = async () => {
-    setVerifyResult('Scanning...');
-    const imageSrc = webcamRef.current.getScreenshot();
-    try {
-      const response = await fetch(`${API_BASE}/verify-face`, { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ image: imageSrc }) 
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail);
-      
-      if (result.match && result.name === verifyingStudent['Student Name']) {
-        setVerifyResult(`✅ Identity Verified: ${result.name}`);
-        setAttendanceRecords(prev => ({ ...prev,[verifyingStudent['Student ID']]: 'present' }));
-        setTimeout(() => { setIsVerifyModalOpen(false); }, 1500);
-      } else if (result.match) {
-        setVerifyResult(`❌ Mismatch! That face belongs to: ${result.name}`);
-        setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
-      } else {
-        setVerifyResult(`❌ Face Not Recognized in Database.`);
-        setAttendanceRecords(prev => ({ ...prev, [verifyingStudent['Student ID']]: 'failed' }));
-      }
-    } catch (error) { setVerifyResult(`⚠️ Error: ${error.message}`); }
   };
 
   // ==========================================
@@ -877,52 +793,6 @@ const handleLogout = async () => {
     }
   };
 
-        const checkExistingRoster = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/has-roster`);
-      const data = await res.json();
-      // Just set the flag, DON'T change the view
-      if (data.has_roster) {
-        setRosterUploaded(true);
-      }
-      // Always fetch available rosters for the list
-      fetchAvailableRosters();
-    } catch (err) {
-      // Backend might not be running or endpoint not added yet
-      // Just fetch available files from disk
-      fetchAvailableRosters();
-    }
-  };
-
-  
-
-const fetchAvailableRosters = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/list-rosters`);
-      const data = await res.json();
-      setAvailableRosters(data.files || []);
-    } catch (err) {
-      console.log("Could not fetch roster list");
-    }
-  };
-
-  const selectRoster = async (filename) => {
-    try {
-      const res = await fetch(`${API_BASE}/select-roster`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Select failed');
-      
-      setRosterUploaded(true);
-      setView('login');
-      alert(`✅ ${data.message}`);
-    } catch (err) {
-      alert(`❌ ${err.message}`);
-    }
-  };
 
     // ==========================================
   // QR AUTHENTICATION
@@ -1001,22 +871,17 @@ const startQRPolling = (token) => {
   window._qrPollInterval = interval;
 };
 
-// Detect URL parameters on mount
+// Detect if opened from QR scan (mobile email entry)
 useEffect(() => {
   const urlParams = new URLSearchParams(window.location.search);
-  const qrToken = urlParams.get('token');
-  const confirmVt = urlParams.get('vt');
-  const confirmT = urlParams.get('t');
-  
-  if (confirmVt && confirmT) {
-    setView('confirm-success');
-  } else if (qrToken) {
+  const token = urlParams.get('token');
+  if (token) {
+    setMobileToken(token);
     setView('verify-mobile');
-  } else {
-    checkExistingRoster();
+    // Clean the URL so a refresh doesn't re-trigger
+    window.history.replaceState({}, document.title, window.location.pathname);
   }
 }, []);
-
 // Generate QR when login view is shown
 useEffect(() => {
   if (view === 'login' && !qrImage) {
@@ -1031,27 +896,31 @@ useEffect(() => {
 }, [view]);
 
   const handleMobileVerify = async (e) => {
-    e.preventDefault();
-    setVerifyMessage('');
+  e.preventDefault();
+  setVerifyMessage('');
+  
+  const token = mobileToken;  // ← USE STATE, NOT URL!
+  
+  if (!token) {
+    setVerifyMessage('❌ Session token missing. Please scan the QR code again.');
+    return;
+  }
+  
+  try {
+    const res = await fetch(`${API_BASE}/request-email-verification`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, email: mobileEmail })
+    });
     
-    const urlParams = new URLSearchParams(window.location.search);
-    const token = urlParams.get('token');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Failed');
     
-    try {
-      const res = await fetch(`${API_BASE}/request-email-verification`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, email: mobileEmail })
-      });
-      
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Failed');
-      
-      setVerifyMessage('✅ Check your email for verification link!');
-    } catch (err) {
-      setVerifyMessage(`❌ ${err.message}`);
-    }
-  };
+    setVerifyMessage('✅ Check your email for verification link!');
+  } catch (err) {
+    setVerifyMessage(`❌ ${err.message}`);
+  }
+};
     // ==========================================
   // CAMERA FOCUS STATE (Adapts to smart tracking)
   // ==========================================
@@ -1098,118 +967,7 @@ useEffect(() => {
         <div className="nav-links"><a>Home</a><a>Study</a><a>Admissions</a><a>Research</a><a>Student Life</a><a>About Us</a></div>
       </nav>
 
-                  {/* UPLOAD / SELECT ROSTER */}
-      {view === 'upload' && (
-        <div className="hero-section">
-          <div className="login-card" style={{ textAlign: 'center', maxWidth: '550px' }}>
-            <h2>📁 Class Roster Setup</h2>
-            <p style={{ color: '#666', fontSize: '14px', marginBottom: '20px' }}>
-              Upload a new Excel file or select an existing one.<br/>
-              Required columns: Faculty Email, Faculty Name, Class Nbr, Student ID, Student Name
-            </p>
-            
-            {/* UPLOAD NEW FILE */}
-            <div 
-              style={{
-                border: `2px dashed ${isDragging ? '#28a745' : '#ccc'}`,
-                borderRadius: '12px',
-                padding: '40px 30px',
-                margin: '20px 0',
-                cursor: 'pointer',
-                background: isDragging ? 'rgba(40, 167, 69, 0.05)' : '#f8f9fa',
-                transition: 'all 0.2s'
-              }}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-              onClick={() => document.getElementById('file-input').click()}
-            >
-              <p style={{ fontSize: '42px', margin: '0 0 10px 0' }}>📊</p>
-              <p style={{ fontWeight: 'bold', color: '#333', margin: '0 0 5px 0' }}>
-                Click to browse or drag Excel file here
-              </p>
-              <p style={{ color: '#888', fontSize: '12px', margin: 0 }}>
-                Upload a new roster file (.xlsx, .xls)
-              </p>
-              <input 
-                id="file-input" 
-                type="file" 
-                accept=".xlsx,.xls" 
-                style={{ display: 'none' }}
-                onChange={handleFileSelect}
-              />
-            </div>
-            
-            {/* OR SELECT EXISTING */}
-            {availableRosters.length > 0 && (
-              <div style={{ marginTop: '20px', textAlign: 'left' }}>
-                <p style={{ 
-                  color: '#2f3254', 
-                  fontWeight: 'bold', 
-                  fontSize: '14px',
-                  marginBottom: '10px',
-                  textAlign: 'center'
-                }}>
-                  — OR select an existing roster —
-                </p>
-                <div style={{ 
-                  maxHeight: '200px', 
-                  overflowY: 'auto',
-                  border: '1px solid #ddd',
-                  borderRadius: '8px',
-                  background: '#fff'
-                }}>
-                  {availableRosters.map((file, idx) => (
-                    <div 
-                      key={idx}
-                      onClick={() => selectRoster(file.filename)}
-                      style={{
-                        padding: '12px 16px',
-                        borderBottom: idx < availableRosters.length - 1 ? '1px solid #eee' : 'none',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        transition: 'background 0.15s'
-                      }}
-                      onMouseEnter={(e) => e.currentTarget.style.background = '#f0f4ff'}
-                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <span style={{ fontSize: '20px' }}>📄</span>
-                        <div>
-                          <div style={{ fontWeight: 'bold', color: '#333', fontSize: '13px' }}>
-                            {file.filename}
-                          </div>
-                          <div style={{ color: '#888', fontSize: '11px' }}>
-                            {file.size_kb} KB • {file.modified}
-                          </div>
-                        </div>
-                      </div>
-                      <span style={{ 
-                        color: '#2f3254', 
-                        fontWeight: 'bold', 
-                        fontSize: '12px',
-                        background: '#e8eaf6',
-                        padding: '4px 12px',
-                        borderRadius: '4px'
-                      }}>
-                        Select ➔
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            
-            {uploadError && (
-              <p style={{ color: '#dc3545', fontSize: '14px', fontWeight: 'bold', marginTop: '15px' }}>
-                ❌ {uploadError}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
+                  
 
              
             {/* LOGIN - QR CODE ONLY */}
@@ -1260,12 +1018,7 @@ useEffect(() => {
               Open your camera app and scan the code above
             </p>
             
-            <button 
-              style={{ marginTop: '20px', background: 'none', border: 'none', color: '#2f3254', textDecoration: 'underline', cursor: 'pointer', fontSize: '13px' }}
-              onClick={() => setView('upload')}
-            >
-              ← Upload different roster
-            </button>
+            
           </div>
         </div>
       )}
@@ -1409,10 +1162,10 @@ useEffect(() => {
                 <tbody>
                   {classes.map((cls, idx) => (
                     <tr key={idx} style={{ cursor: 'default' }}>
-                      <td>{cls['Class Nbr']}</td><td>{cls['Semester']}</td><td>{cls['Course Code']}</td>
+                      <td>{cls['ClassNbr']}</td><td>{cls['Semester']}</td><td>{cls['Course Code']}</td>
                       <td>{cls['Course Name']}</td><td>{cls['Start Time']}</td><td>{cls['Room ID']}</td>
                       <td style={{textAlign: 'center'}}>
-                        <button className="btn-enroll-small" style={{background: '#2f3254', color: 'white'}} onClick={() => fetchStudents(cls['Class Nbr'])}>📋 Check List</button>
+                        <button className="btn-enroll-small" style={{background: '#2f3254', color: 'white'}} onClick={() => fetchStudents(cls['ClassNbr'])}>📋 Check List</button>
                       </td>
                     </tr>
                   ))}
@@ -1471,17 +1224,12 @@ useEffect(() => {
                       <tr key={idx}>
                         <td>{student['Student ID']}</td><td>{student['Student Name']}</td>
                         <td style={{textAlign: 'center'}}>
-                          {status === 'present' ? (
-                            <span style={{ color: 'white', background: '#28a745', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>✅ Present</span>
-                          ) : (
-                            <button 
-                              style={{ padding: '6px 12px', backgroundColor: status === 'failed' ? '#dc3545' : '#e9ecef', color: status === 'failed' ? 'white' : '#333', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', width: '150px' }}
-                              onClick={() => { setVerifyingStudent(student); setVerifyResult(''); setIsVerifyModalOpen(true); }}
-                            >
-                              {status === 'failed' ? '❌ Retry Scan' : 'Verify Attendance'}
-                            </button>
-                          )}
-                        </td>
+                              {status === 'present' ? (
+                                <span style={{ color: 'white', background: '#28a745', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>✅ Present</span>
+                              ) : (
+                                <span style={{ color: '#666', background: '#e9ecef', padding: '6px 16px', borderRadius: '4px', fontWeight: 'bold', display: 'inline-block', width: '120px' }}>⏳ Not Marked</span>
+                              )}
+                            </td>
                       </tr>
                     );
                   })}
@@ -1906,22 +1654,6 @@ useEffect(() => {
         </div>
       )}
 
-      {/* ---------------- 1-ON-1 VERIFICATION MODAL ---------------- */}
-      {isVerifyModalOpen && verifyingStudent && (
-        <div className="modal-overlay" style={{zIndex: 4000}}>
-          <div className="modal-content">
-            <h2 className="modal-header">Verify Identity</h2>
-            <h3 style={{marginTop: 0, color: '#555'}}>Target Student: {verifyingStudent['Student Name']}</h3>
-            <div className="webcam-container" style={{minHeight: '250px'}}>
-              <Webcam audio={false} ref={webcamRef} mirrored={false} screenshotFormat="image/jpeg" width="100%" videoConstraints={ENROLL_CONSTRAINTS} />
-              <div className="webcam-mask" style={{width: '180px', height: '240px'}}></div>
-            </div>
-            <div style={{margin: '15px 0', fontSize: '18px', fontWeight: 'bold', color: verifyResult.includes('❌') ? '#dc3545' : '#28a745'}}>{verifyResult}</div>
-            <button className="btn-capture" onClick={runVerificationScan}>🔍 Scan Face</button>
-            <button className="btn-cancel" onClick={() => setIsVerifyModalOpen(false)}>Close</button>
-          </div>
-        </div>
-      )}
 
     </div>
   );

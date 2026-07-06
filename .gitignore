@@ -7,7 +7,7 @@ env/
 .env
 
 # Data
-data/
+
 
 # AI Models (Downloaded and Generated locally)
 yolov8n.pt
