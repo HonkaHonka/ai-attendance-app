@@ -159,15 +159,12 @@ app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")
 def serve_index():
     return FileResponse(os.path.join(frontend_dist, "index.html"))
 
-@app.get("/{path:path}")
-def serve_spa(path: str):
-    # Don't intercept API routes
-    if path.startswith("api/") or path.startswith("ws/"):
-        raise HTTPException(status_code=404)
-    return FileResponse(os.path.join(frontend_dist, "index.html"))
+print("🔹 Loading Face Embedding Model...")
+face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
-
 
 global_face_db = {}
 
@@ -1391,8 +1388,25 @@ def debug_routes():
 # =========================================================
 # FRONTEND
 # =========================================================
-if os.path.exists("frontend/dist"):
-    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
+frontend_dist = os.path.join(BASE_DIR, "frontend", "dist")
+
+if os.path.exists(frontend_dist):
+    # Serve static assets first (js, css, images)
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+
+    # Serve index.html for the root
+    @app.get("/")
+    def serve_index():
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+
+    # Catch-all route for React Router (Must be at the very bottom!)
+    @app.get("/{path:path}")
+    def serve_spa(path: str):
+        if path.startswith("api/") or path.startswith("ws/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+else:
+    print("⚠️ WARNING: frontend/dist not found. Run 'npm run build' in the frontend folder.")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
