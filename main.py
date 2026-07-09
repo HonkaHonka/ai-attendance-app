@@ -21,6 +21,7 @@ import pandas as pd
 import uvicorn
 import psutil
 import base64
+import pyodbc
 import numpy as np
 from fastapi.responses import FileResponse
 import torch
@@ -37,6 +38,7 @@ from fastapi import UploadFile, File
 from fastapi import Request
 import psycopg2
 from pgvector.psycopg2 import register_vector
+import threading
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -86,12 +88,16 @@ class YuNetMTCNNWrapper:
             nms_threshold=0.3,
             top_k=1
         )
+        self.lock = threading.Lock() # 🚦 NEW: The AI Traffic Light!
     
     def detect(self, img, landmarks=False):
         arr = np.array(img)
         h, w = arr.shape[:2]
-        self.detector.setInputSize((w, h))
-        _, faces = self.detector.detect(arr)
+        
+        # 🚦 NEW: Only one thread can enter this block at a time!
+        with self.lock: 
+            self.detector.setInputSize((w, h))
+            _, faces = self.detector.detect(arr)
         
         if faces is None or len(faces) == 0:
             return None, None, None
@@ -108,7 +114,6 @@ class YuNetMTCNNWrapper:
                 [f[12], f[13]]  # left mouth
             ])
         
-        # Return in MTCNN format: list of np arrays so f_boxes[0] works in your code
         return [np.array(boxes)], [np.array(probs)], [np.array(lms)]
     
     def extract(self, img, boxes, save_path=None):
@@ -128,7 +133,7 @@ class YuNetMTCNNWrapper:
             face = face.resize((160, 160))
             arr = np.array(face).astype(np.float32) / 255.0
             tensor = torch.from_numpy(arr).permute(2, 0, 1)
-            tensor = (tensor - 0.5) / 0.5   # normalize to [-1, 1] like MTCNN
+            tensor = (tensor - 0.5) / 0.5   
             tensors.append(tensor)
         
         if len(tensors) == 1:
@@ -136,7 +141,6 @@ class YuNetMTCNNWrapper:
         return tensors
     
     def __call__(self, img):
-        # Used by enroll_face & verify_face
         boxes, probs, lms = self.detect(img, landmarks=True)
         if boxes is None or boxes[0] is None or len(boxes[0]) == 0:
             return None
@@ -148,19 +152,7 @@ print("✅ YuNet face detector loaded")
 print("🔹 Loading Face Embedding Model...")
 face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-frontend_dist = os.path.join(BASE_DIR, "frontend", "dist")
 
-# Serve static assets first
-app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
-
-# Serve index.html for all other routes (SPA behavior)
-@app.get("/")
-def serve_index():
-    return FileResponse(os.path.join(frontend_dist, "index.html"))
-
-print("🔹 Loading Face Embedding Model...")
-face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -172,18 +164,30 @@ def cosine_similarity(a, b):
     a, b = np.array(a).flatten(), np.array(b).flatten()
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 # --- POSTGRESQL DATABASE CONFIGURATION ---
-DB_CONFIG = {
+PG_DB_CONFIG = {
     "dbname": "liwa_attendance",
     "user": "postgres",
-    "password": "aze123",  # <--- CHANGE THIS TO YOUR POSTGRES PASSWORD!
+    "password": "aze123",  # <--- Put your Postgres password here
     "host": "localhost",
     "port": "5432"
 }
 
-def get_db():
-    conn = psycopg2.connect(**DB_CONFIG)
-    register_vector(conn) # Tells psycopg2 how to handle the 512d FaceNet arrays
+def get_pg_db():
+    conn = psycopg2.connect(**PG_DB_CONFIG)
+    register_vector(conn)
     return conn
+
+# --- 2. MICROSOFT SQL SERVER CONFIGURATION (Rosters & Students) ---
+# "Trusted_Connection=yes" means it uses your Windows login, no password needed!
+MS_SQL_CONFIG = (
+    "Driver={SQL Server};"
+    "Server=localhost\\SQLEXPRESS;"
+    "Database=liwa_attendance;"
+    "Trusted_Connection=yes;"
+)
+
+def get_ms_db():
+    return pyodbc.connect(MS_SQL_CONFIG)
 
 
 
@@ -286,16 +290,16 @@ def request_email_verification(payload: dict, request: Request):
     if session["status"] != "pending":
         raise HTTPException(400, "QR session is no longer valid")
     
-    # 🎯 NEW: Check the PostgreSQL Database instead of Pandas/Excel!
+    # 🎯 NEW: Check the Microsoft SQL Server for the teacher!
     try:
-        conn = get_db()
+        conn = get_ms_db()
         cur = conn.cursor()
-        cur.execute('SELECT "FacultyName" FROM "Att_Course_Class" WHERE LOWER("FacultyID") = LOWER(%s) LIMIT 1', (email,))
+        cur.execute('SELECT FacultyName FROM Att_Course_Class WHERE LOWER(FacultyID) = LOWER(?)', (email,))
         user = cur.fetchone()
         cur.close()
         conn.close()
     except Exception as e:
-        raise HTTPException(500, f"Database error: {str(e)}")
+        raise HTTPException(500, f"MS SQL Database error: {str(e)}")
     
     if not user:
         raise HTTPException(404, "Faculty email not found in university database")
@@ -303,7 +307,7 @@ def request_email_verification(payload: dict, request: Request):
     verify_token = secrets.token_urlsafe(32)
     session["status"] = "email_entered"
     session["email"] = email
-    session["faculty_name"] = user[0] # Extracted from the DB query
+    session["faculty_name"] = user[0] 
     session["verify_token"] = verify_token
     
     host_url = str(request.base_url).rstrip("/")
@@ -377,10 +381,9 @@ def confirm_verification(vt: str, t: str):
 # =========================================================
 @app.get("/api/login")
 def login(email: str):
-    conn = get_db()
+    conn = get_ms_db()
     cur = conn.cursor()
-    # Search for the teacher in the Course table
-    cur.execute('SELECT "FacultyName" FROM "Att_Course_Class" WHERE LOWER("FacultyID") = LOWER(%s) LIMIT 1', (email,))
+    cur.execute('SELECT FacultyName FROM Att_Course_Class WHERE LOWER(FacultyID) = LOWER(?)', (email,))
     user = cur.fetchone()
     cur.close()
     conn.close()
@@ -391,86 +394,80 @@ def login(email: str):
 
 @app.get("/api/classes")
 def classes(email: str, room_id: str = None):
-    conn = get_db()
+    conn = get_ms_db()
     cur = conn.cursor()
     
-    query = 'SELECT "ClassNbr", "sTerm" AS "Semester", "Code" AS "Course Code", "CourseName" AS "Course Name", "StartTime" AS "Start Time", "RoomID" AS "Room ID" FROM "Att_Course_Class" WHERE LOWER("FacultyID") = LOWER(%s)'
+    query = '''SELECT ClassNbr, sTerm AS Semester, Code AS [Course Code], 
+               CourseName AS [Course Name], StartTime AS [Start Time], RoomID AS [Room ID] 
+               FROM Att_Course_Class WHERE LOWER(FacultyID) = LOWER(?)'''
     params = [email]
     
-    # TV Room ID filtering logic!
     if room_id:
-        query += ' AND "RoomID" = %s'
+        query += ' AND RoomID = ?'
         params.append(room_id)
         
-    cur.execute(query, tuple(params))
-    
-    # Convert DB rows to JSON list for React
-    columns = [desc[0] for desc in cur.description]
+    cur.execute(query, params)
+    columns = [column[0] for column in cur.description]
     results = [dict(zip(columns, row)) for row in cur.fetchall()]
-    
     cur.close()
     conn.close()
+    
+    for r in results:
+        if r['Start Time']:
+            r['Start Time'] = r['Start Time'].strftime("%I:%M %p")
     return results
 
 @app.get("/api/students")
 def students(email: str, class_nbr: str):
-    print(f"🔍 Loading students for class_nbr='{class_nbr}', email='{email}'")
-    
-    conn = get_db()
-    cur = conn.cursor()
-    
-    # Load ALL embeddings for students in THIS class from PostgreSQL only
-    cur.execute('''
-        SELECT s."StudentID", 
-               s."StudentName",
-               f."Embedding"
-        FROM "Att_Student" s
-        JOIN "Att_Class_List" cl ON s."StudentID" = cl."StudentID"
-        LEFT JOIN "Att_FaceEmbeddings" f ON s."StudentID" = f."StudentID"
-        WHERE cl."ClassNbr" = %s
+    # 1. Get Names and IDs from Microsoft SQL Server
+    conn_ms = get_ms_db()
+    cur_ms = conn_ms.cursor()
+    cur_ms.execute('''
+        SELECT s.StudentID, s.StudentName
+        FROM Att_Student s
+        JOIN Att_Class_List cl ON s.StudentID = cl.StudentID
+        WHERE cl.ClassNbr = ?
     ''', (str(class_nbr),))
     
-    raw_rows = cur.fetchall()
-    print(f"🔍 Found {len(raw_rows)} raw rows from database")
-    
-    # Group embeddings by student
-    from collections import defaultdict
-    student_embeddings = defaultdict(list)
-    student_names = {}
-    
-    for row in raw_rows:
-        sid, sname, emb = row
-        student_names[sid] = sname
-        if emb is not None:
-            student_embeddings[sid].append(emb)
-        print(f"🔍 Row: {sid}, {sname}, has_embedding={emb is not None}")
-    
-    # Build student list for React
-    student_list = []
-    for sid, sname in student_names.items():
-        student_list.append({
-            "Student ID": sid,
-            "Student Name": sname
-        })
-    
-    # Build fresh face_db (atomic swap) — ONLY from PostgreSQL
-    new_face_db = {}
-    for sid, sname in student_names.items():
-        embs = student_embeddings.get(sid, [])
-        if embs:
-            new_face_db[sid] = {
-                "name": sname,
-                "embeddings": embs
-            }
-    
+    ms_rows = cur_ms.fetchall()
+    student_list = [{"Student ID": row[0], "Student Name": row[1]} for row in ms_rows]
+    student_ids = [row[0] for row in ms_rows]
+    cur_ms.close()
+    conn_ms.close()
+
+    # 2. Get Face DNA from PostgreSQL
+    global global_face_db
     global_face_db.clear()
-    global_face_db.update(new_face_db)
     
-    total_embs = sum(len(v["embeddings"]) for v in global_face_db.values())
-    print(f"🧠 AI Memory: {len(global_face_db)} students, {total_embs} embeddings for class {class_nbr}")
-    
-    cur.close()
-    conn.close()
+    if student_ids:
+        conn_pg = get_pg_db()
+        cur_pg = conn_pg.cursor()
+        cur_pg.execute('''
+            SELECT "StudentID", "Embedding"
+            FROM "Att_FaceEmbeddings"
+            WHERE "StudentID" = ANY(%s)
+        ''', (student_ids,))
+        
+        pg_rows = cur_pg.fetchall()
+        
+        from collections import defaultdict
+        embs_by_student = defaultdict(list)
+        for sid, emb in pg_rows:
+            if emb is not None:
+                embs_by_student[sid].append(emb)
+                
+        # Load AI Memory
+        for student in student_list:
+            sid = student["Student ID"]
+            global_face_db[sid] = {
+                "name": student["Student Name"],
+                "embeddings": embs_by_student.get(sid, [])
+            }
+            
+        cur_pg.close()
+        conn_pg.close()
+        
+    print(f"🧠 AI Memory loaded with {len(global_face_db)} known student records for class {class_nbr}.")
     return student_list
 
 @app.get("/api/db-health")
@@ -479,7 +476,7 @@ def db_health():
     report = []
     
     try:
-        conn = get_db()
+        conn = get_pg_db()
         cur = conn.cursor()
         
         # Get all students with their embeddings
@@ -1216,7 +1213,7 @@ def assign_face(p: AssignPayload):
     count = 0  # ← DEFINED HERE for use in return statement
     
     try:
-        conn = get_db()
+        conn = get_pg_db()
         cur = conn.cursor()
         
         # Count existing embeddings
@@ -1296,7 +1293,7 @@ class UnassignPayload(BaseModel):
 def unassign_student(p: UnassignPayload):
     # Remove from PostgreSQL
     try:
-        conn = get_db()
+        conn = get_pg_db()
         cur = conn.cursor()
         cur.execute('DELETE FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (p.student_id,))
         deleted = cur.rowcount
@@ -1329,51 +1326,32 @@ class AttendanceExportPayload(BaseModel):
 
 @app.post("/api/export-attendance")
 def export_attendance(payload: AttendanceExportPayload):
-    conn = get_db()
+    conn = get_ms_db()
     cur = conn.cursor()
-    
-    # Get the students for this class and the course info
     cur.execute('''
-        SELECT s."StudentID", s."StudentName", c."CourseName", c."StartTime"
-        FROM "Att_Student" s
-        JOIN "Att_Class_List" cl ON s."StudentID" = cl."StudentID"
-        JOIN "Att_Course_Class" c ON cl."ClassNbr" = c."ClassNbr"
-        WHERE cl."ClassNbr" = %s
+        SELECT s.StudentID, s.StudentName, c.CourseName, c.StartTime
+        FROM Att_Student s
+        JOIN Att_Class_List cl ON s.StudentID = cl.StudentID
+        JOIN Att_Course_Class c ON cl.ClassNbr = c.ClassNbr
+        WHERE cl.ClassNbr = ?
     ''', (str(payload.class_nbr),))
     
     rows = cur.fetchall()
     cur.close()
     conn.close()
     
-    if not rows:
-        raise HTTPException(status_code=404, detail="Class not found.")
-        
-    # Build the report data
     report_data = []
     for row in rows:
-        student_id, student_name, course_name, start_time = row
-        # Check the payload to see if they were marked present
-        status = "Present" if payload.attendance_records.get(str(student_id)) == "present" else "Absent"
-        
-        report_data.append({
-            "Student ID": student_id,
-            "Student Name": student_name,
-            "Course Name": course_name,
-            "Start Time": start_time.strftime("%I:%M %p") if start_time else "",
-            "Attendance Status": status
-        })
+        status = "Present" if payload.attendance_records.get(str(row[0])) == "present" else "Absent"
+        report_data.append({"Student ID": row[0], "Student Name": row[1], "Course Name": row[2], "Start Time": row[3].strftime("%I:%M %p") if row[3] else "", "Attendance Status": status})
 
-    # Convert to DataFrame just for easy Excel exporting
-    import pandas as pd
     report_df = pd.DataFrame(report_data)
-
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         report_df.to_excel(writer, index=False, sheet_name='Attendance Report')
     output.seek(0)
-    
-    headers = { 'Content-Disposition': f'attachment; filename="Attendance_Class_{payload.class_nbr}.xlsx"' }
-    return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    return StreamingResponse(output, headers={'Content-Disposition': f'attachment; filename="Attendance_Class_{payload.class_nbr}.xlsx"'}, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
 @app.get("/api/debug-routes")
 def debug_routes():
     routes = []

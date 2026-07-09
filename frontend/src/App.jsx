@@ -707,7 +707,8 @@ const handleLogout = async () => {
         student_name: studentName,
         image: quickEnrollData.image,
         box: quickEnrollData.box || null,
-        is_manual: quickEnrollData.isManual || false
+        is_manual: quickEnrollData.isManual || false,
+        class_nbr: String(selectedClass) // <--- THIS IS THE FIX
       };
 
       const response = await fetch(`${API_BASE}/assign-face`, {
