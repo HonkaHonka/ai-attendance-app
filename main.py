@@ -158,6 +158,37 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# =========================================================
+# 🔐 BIO-HASHING (ORTHOGONAL RANDOM PROJECTION)
+# =========================================================
+SECRET_MATRIX_PATH = os.path.join(DATA_DIR, "secret_matrix.npy")
+
+def get_or_create_secret_matrix(dim=512):
+    """Loads or generates a mathematical lock that scrambles Face DNA."""
+    if os.path.exists(SECRET_MATRIX_PATH):
+        return np.load(SECRET_MATRIX_PATH)
+    else:
+        print("🔐 Generating new Bio-Hashing Secret Matrix...")
+        # 1. Generate a random matrix
+        H = np.random.randn(dim, dim)
+        # 2. QR decomposition extracts a perfectly Orthogonal Matrix (Q)
+        Q, R = np.linalg.qr(H)
+        Q = Q.astype(np.float32) # Ensure it matches FaceNet data type
+        np.save(SECRET_MATRIX_PATH, Q)
+        return Q
+
+SECRET_MATRIX = get_or_create_secret_matrix(512)
+
+def get_face_embedding(face_tensor):
+    """Extracts FaceNet embedding and applies Bio-Hashing encryption."""
+    with torch.no_grad():
+        raw_emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+    
+    # Multiply by Orthogonal Matrix to scramble the data
+    # Cosine similarity is mathematically preserved!
+    scrambled_emb = np.dot(raw_emb, SECRET_MATRIX)
+    return scrambled_emb
+
 global_face_db = {}
 
 def cosine_similarity(a, b):
@@ -600,8 +631,7 @@ def enroll_face(payload: EnrollPayload):
                 
                 face_tensor = mtcnn(img)
                 if face_tensor is not None:
-                    with torch.no_grad():
-                        emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+                    emb = get_face_embedding(face_tensor)
                     student_embeddings.append(emb.tolist())
             except Exception: 
                 pass
@@ -611,7 +641,7 @@ def enroll_face(payload: EnrollPayload):
     
     # Save to PostgreSQL
     try:
-        conn = get_db()
+        conn = get_pg_db()
         cur = conn.cursor()
         
         # Clear old embeddings first (full re-enrollment)
@@ -657,8 +687,7 @@ def verify_face(payload: VerifyPayload):
         
         face_tensor = mtcnn(img)
         if face_tensor is None: raise ValueError("No face detected")
-        with torch.no_grad():
-            live_embedding = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+        live_embedding = get_face_embedding(face_tensor)
     except Exception: raise HTTPException(status_code=400, detail="No face detected in the camera.")
 
     best_match_name = "Unknown"
@@ -836,7 +865,7 @@ def process_frame(image_b64):
 
             # --- HEAD CROP ---
             t_crop = time.perf_counter()
-            head_h = int((y2 - y1) * 0.50)
+            head_h = int((y2 - y1) * 0.60)
             hx1 = max(0, x1 - 20)
             hy1 = max(0, y1 - 20)
             hx2 = min(img.width, x2 + 20)
@@ -909,8 +938,7 @@ def process_frame(image_b64):
                             
                             # --- FACENET EMBEDDING ---
                             t_facenet = time.perf_counter()
-                            with torch.no_grad():
-                                emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+                            emb = get_face_embedding(face_tensor)
                             timers['facenet'] = timers.get('facenet', 0) + (time.perf_counter() - t_facenet) * 1000
                             
                             # --- DB SEARCH ---
@@ -999,7 +1027,7 @@ def process_frame(image_b64):
     if pg_save_required:
         t_save = time.perf_counter()
         try:
-            conn = get_db()
+            conn = get_pg_db()
             cur = conn.cursor()
             
             for sid, data in global_face_db.items():
@@ -1176,8 +1204,7 @@ def assign_face(p: AssignPayload):
         raise HTTPException(status_code=400, detail="Face extraction failed.")
     
     face_tensor = face_tensors[0]
-    with torch.no_grad():
-        emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
+    emb = get_face_embedding(face_tensor)
     
     # IDENTITY CONSISTENCY
     if p.student_id in global_face_db and len(global_face_db[p.student_id]["embeddings"]) > 0:
@@ -1246,7 +1273,7 @@ def assign_face(p: AssignPayload):
             INSERT INTO "Att_FaceEmbeddings" 
             ("StudentID", "Embedding", "QualityScore", "Symmetry", "SourceClassNbr")
             VALUES (%s, %s, %s, %s, %s)
-        ''', (p.student_id, emb.tolist(), float(probs_arr[best_idx]), symmetry, p.class_nbr))
+        ''', (p.student_id, emb.tolist(), float(probs_arr[best_idx]), float(symmetry), p.class_nbr))
         
         conn.commit()
         print(f"☁️ Saved embedding {count+1}/8 for {p.student_name} to PostgreSQL")
@@ -1278,9 +1305,9 @@ def assign_face(p: AssignPayload):
         "status": "success",
         "message": f"✅ {p.student_name} enrolled successfully.",
         "quality": "excellent",
-        "symmetry": round(symmetry, 3),
+        "symmetry": round(float(symmetry), 3),
         "confidence": round(float(probs_arr[best_idx]), 3),
-        "total_embeddings": count + 1  # ← count is now defined
+        "total_embeddings": count + 1 
     }
 
 
