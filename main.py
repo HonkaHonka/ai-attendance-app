@@ -831,8 +831,8 @@ def process_frame(image_b64):
             
             heavy_ai_runs_this_frame += 1
 
-            # --- HEAD CROP (0.70 to include chin) ---
-            head_h = int((y2 - y1) * 0.70)
+            # --- HEAD CROP (REVERTED TO 0.50 TO FIX YUNET BUG!) ---
+            head_h = int((y2 - y1) * 0.50)
             hx1, hy1 = max(0, x1 - 20), max(0, y1 - 20)
             hx2, hy2 = min(img.width, x2 + 20), min(img.height, y1 + head_h + 20)
             
@@ -859,46 +859,54 @@ def process_frame(image_b64):
                         face_abs_box = [int(hx1 + fb[0]), int(hy1 + fb[1]), int(fb[2] - fb[0]), int(fb[3] - fb[1])]
                         person["frames_no_face"] = 0
 
-                        # --- YUNET EXTRACT ---
-                        extracted = mtcnn.extract(head_crop, boxes_arr[best_idx:best_idx+1], save_path=None)
-                        face_tensors = [extracted] if isinstance(extracted, torch.Tensor) else (extracted or [])
-                        
-                        if len(face_tensors) > 0:
-                            # --- FACENET EMBEDDING (SECURE BIO-HASH) ---
-                            emb = get_face_embedding(face_tensors[0])
+                        # --- SAFETY NET: TRY/EXCEPT FOR HEAVY AI ---
+                        try:
+                            # --- YUNET EXTRACT ---
+                            extracted = mtcnn.extract(head_crop, boxes_arr[best_idx:best_idx+1], save_path=None)
+                            face_tensors = [extracted] if isinstance(extracted, torch.Tensor) else (extracted or [])
                             
-                            # --- DB SEARCH ---
-                            sid, name, score = recognize_face(emb)
-
-                            # 🛑 ANTI-CLONE ENFORCEMENT 
-                            if sid in seen_sids_this_frame:
-                                sid, name, score = None, "Unknown", -1.0 # Deny clone
-                            elif sid:
-                                seen_sids_this_frame.add(sid) # Claim identity
-
-                            if sid:
-                                person["student_id"] = sid
-                                person["name"] = name
-                                person["status"] = "known"
-                                person["last_recognized"] = current_time
+                            if len(face_tensors) > 0:
+                                # --- FACENET EMBEDDING (SECURE BIO-HASH) ---
+                                emb = get_face_embedding(face_tensors[0])
                                 
-                                # ACTIVE LEARNING
-                                existing = global_face_db[sid]["embeddings"]
-                                if 0.72 < score < 0.94 and probs_arr[best_idx] > 0.85 and len(existing) < 8:
-                                    sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing] if existing else [0]
-                                    if max(sims_to_existing) <= 0.85:
-                                        lm = landmarks_arr[best_idx]
-                                        dist_left = np.linalg.norm(lm[2] - lm[0])
-                                        dist_right = np.linalg.norm(lm[2] - lm[1])
-                                        symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
-                                        
-                                        if symmetry > 0.60:
-                                            existing.append(emb.tolist())
-                                            pg_save_required = True 
-                            else:
-                                person["student_id"] = None
-                                person["name"] = "Unknown"
-                                person["status"] = "unknown"
+                                # --- DB SEARCH ---
+                                sid, name, score = recognize_face(emb)
+
+                                # 🛑 ANTI-CLONE ENFORCEMENT 
+                                if sid in seen_sids_this_frame:
+                                    sid, name, score = None, "Unknown", -1.0 # Deny clone
+                                elif sid:
+                                    seen_sids_this_frame.add(sid) # Claim identity
+
+                                if sid:
+                                    person["student_id"] = sid
+                                    person["name"] = name
+                                    person["status"] = "known"
+                                    person["last_recognized"] = current_time
+                                    
+                                    # ACTIVE LEARNING
+                                    existing = global_face_db[sid]["embeddings"]
+                                    if 0.72 < score < 0.94 and probs_arr[best_idx] > 0.85 and len(existing) < 8:
+                                        sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing] if existing else [0]
+                                        if max(sims_to_existing) <= 0.85:
+                                            lm = landmarks_arr[best_idx]
+                                            dist_left = np.linalg.norm(lm[2] - lm[0])
+                                            dist_right = np.linalg.norm(lm[2] - lm[1])
+                                            symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
+                                            
+                                            if symmetry > 0.60:
+                                                existing.append(emb.tolist())
+                                                pg_save_required = True 
+                                else:
+                                    person["student_id"] = None
+                                    person["name"] = "Unknown"
+                                    person["status"] = "unknown"
+                        
+                        except Exception as e:
+                            print(f"⚠️ Heavy AI Error: {e}")
+                            person["student_id"] = None
+                            person["name"] = "Unknown"
+                            person["status"] = "unknown"
 
             if not face_found:
                 person["frames_no_face"] += 1
@@ -923,8 +931,13 @@ def process_frame(image_b64):
             cur = conn.cursor()
             for sid, data in global_face_db.items():
                 cur.execute('SELECT COUNT(*) FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (sid,))
-                if len(data["embeddings"]) > cur.fetchone()[0] and cur.fetchone()[0] < 8:
-                    cur.execute('''INSERT INTO "Att_FaceEmbeddings" ("StudentID", "Embedding", "QualityScore", "Symmetry") VALUES (%s, %s, %s, %s)''', (sid, data["embeddings"][-1], 0.85, 0.80))
+                pg_count = cur.fetchone()[0]
+                
+                runtime_embs = data["embeddings"]
+                if len(runtime_embs) > pg_count and pg_count < 8:
+                    newest_emb = runtime_embs[-1]
+                    # ADDED float() wrapper here too just to be safe!
+                    cur.execute('''INSERT INTO "Att_FaceEmbeddings" ("StudentID", "Embedding", "QualityScore", "Symmetry") VALUES (%s, %s, %s, %s)''', (sid, newest_emb, 0.85, 0.80))
             conn.commit()
             cur.close()
             conn.close()
