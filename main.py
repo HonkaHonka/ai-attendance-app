@@ -29,7 +29,7 @@ from PIL import Image
 import io
 import asyncio
 from ultralytics import YOLO
-from facenet_pytorch import InceptionResnetV1
+from insightface.app import FaceAnalysis
 import cv2
 from typing import Dict
 import time
@@ -45,12 +45,43 @@ import threading
 app = FastAPI(title="AI Live Attendance Backend")
 app.add_middleware(
     CORSMiddleware, 
-    allow_origins=["*"], 
-    allow_credentials=True, 
+    allow_origins=["*"],      # 🚦 Back to standard wildcard
+    allow_credentials=False,  # 🚦 THIS IS THE FIX: Disables strict WebSocket blocking!
     allow_methods=["*"], 
     allow_headers=["*"],
-    expose_headers=["X-QR-Token"]  # <--- ADD THIS LINE
+    expose_headers=["X-QR-Token"]
 )
+
+from concurrent.futures import ThreadPoolExecutor
+
+# Create a thread pool so heavy AI processing doesn't block the async event loop
+ws_executor = ThreadPoolExecutor(max_workers=2)
+
+@app.websocket("/ws/surveillance")
+async def websocket_surveillance(websocket: WebSocket):
+    await websocket.accept()
+    print("🔌 WebSocket surveillance client connected")
+    try:
+        while True:
+            data = await websocket.receive_json()
+            image_b64 = data.get("image", "")
+            
+            # Run CPU-heavy CV in a background thread to keep the event loop alive
+            faces = await asyncio.get_event_loop().run_in_executor(
+                ws_executor, process_frame, image_b64
+            )
+            
+            await websocket.send_json({"faces": faces})
+            
+    except WebSocketDisconnect:
+        print("🔌 WebSocket client disconnected")
+    except Exception as e:
+        print(f"⚠️ WebSocket error: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 device = torch.device("cpu")
 print(f"✅ RUNNING ON {device}")
@@ -78,79 +109,12 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
-class YuNetMTCNNWrapper:
-    def __init__(self, model_path="face_detection_yunet_2023mar.onnx"):
-        self.detector = cv2.FaceDetectorYN.create(
-            model=model_path,
-            config="",
-            input_size=(320, 320),
-            score_threshold=0.75,
-            nms_threshold=0.3,
-            top_k=1
-        )
-        self.lock = threading.Lock() # 🚦 NEW: The AI Traffic Light!
-    
-    def detect(self, img, landmarks=False):
-        arr = np.array(img)
-        h, w = arr.shape[:2]
-        
-        # 🚦 NEW: Only one thread can enter this block at a time!
-        with self.lock: 
-            self.detector.setInputSize((w, h))
-            _, faces = self.detector.detect(arr)
-        
-        if faces is None or len(faces) == 0:
-            return None, None, None
-        
-        boxes, probs, lms = [], [], []
-        for f in faces:
-            boxes.append([f[0], f[1], f[2], f[3]])
-            probs.append(float(f[14]))
-            lms.append([
-                [f[4], f[5]],   # right eye
-                [f[6], f[7]],   # left eye
-                [f[8], f[9]],   # nose
-                [f[10], f[11]], # right mouth
-                [f[12], f[13]]  # left mouth
-            ])
-        
-        return [np.array(boxes)], [np.array(probs)], [np.array(lms)]
-    
-    def extract(self, img, boxes, save_path=None):
-        if boxes is None or len(boxes) == 0:
-            return None
-        
-        tensors = []
-        for box in boxes:
-            x, y, w, h = map(float, box)
-            margin = 0.2
-            x1 = max(0, int(x - w * margin))
-            y1 = max(0, int(y - h * margin))
-            x2 = min(img.width, int(x + w * (1 + margin)))
-            y2 = min(img.height, int(y + h * (1 + margin)))
-            
-            face = img.crop((x1, y1, x2, y2))
-            face = face.resize((160, 160))
-            arr = np.array(face).astype(np.float32) / 255.0
-            tensor = torch.from_numpy(arr).permute(2, 0, 1)
-            tensor = (tensor - 0.5) / 0.5   
-            tensors.append(tensor)
-        
-        if len(tensors) == 1:
-            return tensors[0]
-        return tensors
-    
-    def __call__(self, img):
-        boxes, probs, lms = self.detect(img, landmarks=True)
-        if boxes is None or boxes[0] is None or len(boxes[0]) == 0:
-            return None
-        return self.extract(img, boxes[0][:1])
-
-mtcnn = YuNetMTCNNWrapper("face_detection_yunet_2023mar.onnx")
-print("✅ YuNet face detector loaded")
-
-print("🔹 Loading Face Embedding Model...")
-face_net = InceptionResnetV1(pretrained="vggface2").eval().to(device)
+print("🔹 Loading InsightFace (ArcFace 512D + RetinaFace)...")
+# buffalo_l contains the best detection and recognition models natively!
+face_app = FaceAnalysis(name='buffalo_l', allowed_modules=['detection', 'recognition'])
+face_app.prepare(ctx_id=-1, det_size=(320, 320))
+ai_lock = threading.Lock() # 🚦 Traffic light to prevent thread crashes
+print("✅ InsightFace Models Loaded Successfully!")
 
 
 
@@ -179,13 +143,8 @@ def get_or_create_secret_matrix(dim=512):
 
 SECRET_MATRIX = get_or_create_secret_matrix(512)
 
-def get_face_embedding(face_tensor):
-    """Extracts FaceNet embedding and applies Bio-Hashing encryption."""
-    with torch.no_grad():
-        raw_emb = face_net(face_tensor.unsqueeze(0).to(device)).cpu().numpy()[0]
-    
-    # Multiply by Orthogonal Matrix to scramble the data
-    # Cosine similarity is mathematically preserved!
+def get_face_embedding(raw_emb):
+    """Applies Bio-Hashing encryption to the raw ArcFace embedding."""
     scrambled_emb = np.dot(raw_emb, SECRET_MATRIX)
     return scrambled_emb
 
@@ -622,19 +581,20 @@ def enroll_face(payload: EnrollPayload):
     student_embeddings = []
     for angle, b64_list in payload.images.items():
         for b64_str in b64_list:
-            if not b64_str: 
-                continue
+            if not b64_str: continue
             try:
-                if ',' in b64_str: 
-                    b64_str = b64_str.split(',')[1]
+                if ',' in b64_str: b64_str = b64_str.split(',')[1]
                 img = Image.open(io.BytesIO(base64.b64decode(b64_str))).convert('RGB')
+                img_bgr = np.array(img)[:, :, ::-1] # InsightFace needs BGR
                 
-                face_tensor = mtcnn(img)
-                if face_tensor is not None:
-                    emb = get_face_embedding(face_tensor)
+                with ai_lock:
+                    faces = face_app.get(img_bgr)
+                    
+                if faces:
+                    best_face = sorted(faces, key=lambda x: x.det_score, reverse=True)[0]
+                    emb = get_face_embedding(best_face.embedding)
                     student_embeddings.append(emb.tolist())
-            except Exception: 
-                pass
+            except Exception: pass
             
     if len(student_embeddings) == 0: 
         raise HTTPException(status_code=400, detail="Could not detect a clear face.")
@@ -643,36 +603,19 @@ def enroll_face(payload: EnrollPayload):
     try:
         conn = get_pg_db()
         cur = conn.cursor()
-        
-        # Clear old embeddings first (full re-enrollment)
         cur.execute('DELETE FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (payload.student_id,))
-        
-        for i, emb in enumerate(student_embeddings[:8]):  # Cap at 8
-            cur.execute('''
-                INSERT INTO "Att_FaceEmbeddings" 
-                ("StudentID", "Embedding", "QualityScore", "Symmetry")
-                VALUES (%s, %s, %s, %s)
-            ''', (payload.student_id, emb, 0.85, 0.80))
-        
+        for i, emb in enumerate(student_embeddings[:15]):  # Cap increased to 15!
+            cur.execute('''INSERT INTO "Att_FaceEmbeddings" ("StudentID", "Embedding", "QualityScore", "Symmetry")
+                           VALUES (%s, %s, %s, %s)''', (payload.student_id, emb, 0.85, 0.80))
         conn.commit()
         cur.close()
         conn.close()
-        
-        print(f"☁️ Saved {len(student_embeddings[:8])} embeddings for {payload.student_name} to PostgreSQL")
-        
+        print(f"☁️ Saved {len(student_embeddings[:15])} ArcFace embeddings for {payload.student_name}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     
-    # Update runtime cache
-    global_face_db[payload.student_id] = {
-        "name": payload.student_name, 
-        "embeddings": student_embeddings[:8]
-    }
-    
-    return {
-        "status": "success", 
-        "message": f"Successfully memorized {payload.student_name}"
-    }
+    global_face_db[payload.student_id] = {"name": payload.student_name, "embeddings": student_embeddings[:15]}
+    return {"status": "success", "message": f"Successfully memorized {payload.student_name}"}
 
 class VerifyPayload(BaseModel):
     image: str  
@@ -684,15 +627,17 @@ def verify_face(payload: VerifyPayload):
         b64_str = payload.image
         if ',' in b64_str: b64_str = b64_str.split(',')[1]
         img = Image.open(io.BytesIO(base64.b64decode(b64_str))).convert('RGB')
+        img_bgr = np.array(img)[:, :, ::-1]
         
-        face_tensor = mtcnn(img)
-        if face_tensor is None: raise ValueError("No face detected")
-        live_embedding = get_face_embedding(face_tensor)
+        with ai_lock:
+            faces = face_app.get(img_bgr)
+            
+        if not faces: raise ValueError("No face detected")
+        live_embedding = get_face_embedding(faces[0].embedding)
     except Exception: raise HTTPException(status_code=400, detail="No face detected in the camera.")
 
-    best_match_name = "Unknown"
-    best_match_score = -1.0 
-    MATCH_THRESHOLD = 0.65 
+    best_match_name, best_match_score = "Unknown", -1.0 
+    MATCH_THRESHOLD = 0.40 # ArcFace optimized threshold
 
     for student_id, data in global_face_db.items():
         for saved_embedding in data["embeddings"]:
@@ -703,7 +648,7 @@ def verify_face(payload: VerifyPayload):
 
     if best_match_score > MATCH_THRESHOLD:
         return {"status": "success", "match": True, "name": best_match_name, "confidence": f"{best_match_score*100:.1f}%"}
-    else: return {"status": "success", "match": False, "name": "Unknown"}
+    return {"status": "success", "match": False, "name": "Unknown"}
 
 # =========================================================
 # LIVE SURVEILLANCE CORE
@@ -733,7 +678,7 @@ def recognize_face(emb):
             if sim > best_score:
                 best_score, best_id, best_name = sim, sid, data["name"]
     
-    MATCH_THRESHOLD = 0.65
+    MATCH_THRESHOLD = 0.40
     if best_score >= MATCH_THRESHOLD:
         return best_id, best_name, best_score
     return None, "Unknown", best_score
@@ -743,28 +688,11 @@ def recognize_face(emb):
 def process_frame(image_b64):
     global live_tracker_memory
     t_start = time.perf_counter()
-    
-    boxes = []
-    track_ids = []
 
-    # --- PROFILING STATE ---
-    timers = {}
-    facenet_runs = 0
-    yunet_detect_runs = 0
-    yunet_extract_runs = 0
-    db_compare_count = 0
-    process = psutil.Process(os.getpid())
-    mem_before = process.memory_info().rss / 1024 / 1024
-    # -----------------------
+    if not image_b64: return []
+    if "," in image_b64: image_b64 = image_b64.split(",")[1]
+    if not image_b64: return []
 
-    if not image_b64:
-        return []
-    if "," in image_b64:
-        image_b64 = image_b64.split(",")[1]
-    if not image_b64:
-        return []
-
-    t0 = time.perf_counter()
     try:
         img_bytes = base64.b64decode(image_b64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -773,340 +701,174 @@ def process_frame(image_b64):
 
     frame_bgr = np.array(img)[:, :, ::-1]
     
-    timers['decode'] = (time.perf_counter() - t0) * 1000
-    
-    t1 = time.perf_counter()
     results = yolo_person.track(
-        frame_bgr,
-        conf=0.45,
-        iou=0.40,
-        classes=[0],
-        tracker="bytetrack.yaml",
-        persist=True,
-        verbose=False
+        frame_bgr, conf=0.45, iou=0.40, classes=[0],
+        tracker="bytetrack.yaml", persist=True, verbose=False
     )
-    timers['yolo'] = (time.perf_counter() - t1) * 1000
     
     faces_out = []
     current_frame_tracks = {}
-    pg_save_required = False  # For active learning PostgreSQL save
+    pg_save_required = False  
     current_time = time.time()
+
+    # 🛑 ANTI-CLONE SET
+    seen_sids_this_frame = set()
+
+    # 🚦 HEARTBEAT THROTTLE: Max 1 Heavy AI run per frame!
+    heavy_ai_runs_this_frame = 0  
+    MAX_HEAVY_AI = 1    
 
     if results and results[0].boxes is not None and results[0].boxes.id is not None:
         boxes = results[0].boxes.xyxy.cpu().numpy()
         track_ids = results[0].boxes.id.cpu().numpy()
 
+        # PASS 1: Reserve identities
         for box, track_id in zip(boxes, track_ids):
-            if np.isnan(box).any():
-                continue
-                
+            person = live_tracker_memory.get(int(track_id))
+            if person and person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 10.0:
+                if person.get("student_id"):
+                    seen_sids_this_frame.add(person["student_id"])
+
+        # PASS 2: Process boxes
+        for box, track_id in zip(boxes, track_ids):
+            if np.isnan(box).any(): continue
             x1, y1, x2, y2 = map(int, box)
             track_id = int(track_id)
-            
-            if (x2 - x1) < 40 or (y2 - y1) < 40:
-                continue
+            if (x2 - x1) < 40 or (y2 - y1) < 40: continue
 
             person = live_tracker_memory.get(track_id, {
-                "student_id": None,
-                "name": "Scanning...",
-                "status": "scanning",
-                "frames_no_face": 0,
-                "last_seen": current_time,
-                "last_recognized": 0,
-                "last_processed": 0,
-                "last_face_seen": 0
+                "student_id": None, "name": "Scanning...", "status": "scanning",
+                "match_score": 0.0, "frames_no_face": 0, "last_seen": current_time, 
+                "last_recognized": 0, "last_processed": 0, "last_face_seen": 0
             })
             person["last_seen"] = current_time
 
-            # FAST PATH 1: Known — skip recognition for 10 seconds
-            if (person.get("status") == "known" and 
-                (current_time - person.get("last_recognized", 0)) < 10.0):
-                
+            # FAST PATH 1: Known
+            if person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 10.0:
                 if (current_time - person.get("last_face_seen", 0)) > 3.0:
                     person["status"] = "no_face"
                     person["name"] = "No Face"
                     person["frames_no_face"] = 3
+                    if person.get("student_id") in seen_sids_this_frame:
+                        seen_sids_this_frame.remove(person["student_id"])
                 
                 current_frame_tracks[track_id] = person
-                faces_out.append({
-                    "box": [x1, y1, x2 - x1, y2 - y1],
-                    "track_id": track_id,
-                    "student_id": person["student_id"] if person["status"] == "known" else None,
-                    "name": person["name"],
-                    "status": person["status"]
-                })
+                faces_out.append({"box": [x1, y1, x2 - x1, y2 - y1], "track_id": track_id, "student_id": person["student_id"] if person["status"] == "known" else None, "name": person["name"], "status": person["status"]})
                 continue
 
-            # FAST PATH 2: Unknown
-            if (person.get("status") == "unknown" and 
-                (current_time - person.get("last_processed", 0)) < 5.0):
+            # FAST PATH 2: Unknown recently
+            if person.get("status") == "unknown" and (current_time - person.get("last_processed", 0)) < 5.0:
                 current_frame_tracks[track_id] = person
-                faces_out.append({
-                    "box": [x1, y1, x2 - x1, y2 - y1],
-                    "track_id": track_id,
-                    "student_id": None,
-                    "name": "Unknown",
-                    "status": "unknown"
-                })
+                faces_out.append({"box": [x1, y1, x2 - x1, y2 - y1], "track_id": track_id, "student_id": None, "name": "Unknown", "status": "unknown"})
                 continue
 
-            # FAST PATH 3: No face
-            if (person.get("status") == "no_face" and 
-                (current_time - person.get("last_processed", 0)) < 3.0):
+            # HEARTBEAT THROTTLE
+            if heavy_ai_runs_this_frame >= MAX_HEAVY_AI:
                 current_frame_tracks[track_id] = person
-                faces_out.append({
-                    "box": [x1, y1, x2 - x1, y2 - y1],
-                    "track_id": track_id,
-                    "student_id": None,
-                    "name": "No Face",
-                    "status": "no_face"
-                })
+                faces_out.append({"box": [x1, y1, x2 - x1, y2 - y1], "track_id": track_id, "student_id": None, "name": "Scanning...", "status": "scanning"})
                 continue
+            
+            heavy_ai_runs_this_frame += 1
 
             # --- HEAD CROP ---
-            t_crop = time.perf_counter()
-            head_h = int((y2 - y1) * 0.60)
-            hx1 = max(0, x1 - 20)
-            hy1 = max(0, y1 - 20)
-            hx2 = min(img.width, x2 + 20)
-            hy2 = min(img.height, y1 + head_h + 20)
+            head_h = int((y2 - y1) * 0.70)
+            hx1, hy1 = max(0, x1 - 20), max(0, y1 - 20)
+            hx2, hy2 = min(img.width, x2 + 20), min(img.height, y1 + head_h + 20)
             
-            if hx2 <= hx1 or hy2 <= hy1:
-                continue
+            if hx2 <= hx1 or hy2 <= hy1: continue
             head_crop = img.crop((hx1, hy1, hx2, hy2))
-            timers['crop'] = timers.get('crop', 0) + (time.perf_counter() - t_crop) * 1000
+            head_crop_bgr = np.array(head_crop)[:, :, ::-1]
 
-            # --- YUNET DETECT ---
-            t_yunet = time.perf_counter()
-            f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
-            timers['yunet_detect'] = timers.get('yunet_detect', 0) + (time.perf_counter() - t_yunet) * 1000
-            yunet_detect_runs += 1
+            # --- INSIGHTFACE DETECT & EXTRACT ---
+            with ai_lock:
+                detected_faces = face_app.get(head_crop_bgr)
             
             face_found = False
-            face_abs_box = None
             
-            if f_boxes is not None and len(f_boxes) > 0 and f_boxes[0] is not None:
-                boxes_raw = f_boxes[0]
-                probs_raw = f_probs[0]
-                landmarks_raw = f_landmarks[0]
+            if detected_faces and len(detected_faces) > 0:
+                best_face = sorted(detected_faces, key=lambda x: x.det_score, reverse=True)[0]
                 
-                boxes_arr = np.array(boxes_raw)
-                if boxes_arr.ndim == 1:
-                    boxes_arr = boxes_arr.reshape(1, 4)
-                
-                probs_arr = np.array(probs_raw)
-                if probs_arr.ndim == 0:
-                    probs_arr = probs_arr.reshape(1)
-                
-                landmarks_arr = np.array(landmarks_raw)
-                if landmarks_arr.ndim == 2:
-                    landmarks_arr = landmarks_arr.reshape(1, 5, 2)
-                
-                if len(boxes_arr) > 0:
-                    best_idx = int(np.argmax(probs_arr))
+                if best_face.det_score > 0.60: 
+                    face_found = True
+                    person["last_face_seen"] = current_time 
+                    person["frames_no_face"] = 0
                     
-                    if probs_arr[best_idx] > 0.80:
-                        face_found = True
-                        person["last_face_seen"] = current_time 
-                        fb = boxes_arr[best_idx]
-                        face_abs_box = [
-                            int(hx1 + fb[0]),
-                            int(hy1 + fb[1]),
-                            int(fb[2] - fb[0]),
-                            int(fb[3] - fb[1])
-                        ]
-                        person["frames_no_face"] = 0
+                    raw_emb = best_face.embedding
+                    emb = get_face_embedding(raw_emb)
+                    
+                    sid, name, score = recognize_face(emb)
 
-                        best_box = boxes_arr[best_idx:best_idx+1]
-                        
-                        # --- YUNET EXTRACT ---
-                        t_extract = time.perf_counter()
-                        extracted = mtcnn.extract(head_crop, best_box, save_path=None)
-                        timers['yunet_extract'] = timers.get('yunet_extract', 0) + (time.perf_counter() - t_extract) * 1000
-                        yunet_extract_runs += 1
-                        
-                        if extracted is None:
-                            face_tensors = []
-                        elif isinstance(extracted, torch.Tensor):
-                            face_tensors = [extracted]
-                        else:
-                            face_tensors = extracted
-                        
-                        if len(face_tensors) > 0:
-                            face_tensor = face_tensors[0]
-                            facenet_runs += 1
-                            
-                            # --- FACENET EMBEDDING ---
-                            t_facenet = time.perf_counter()
-                            emb = get_face_embedding(face_tensor)
-                            timers['facenet'] = timers.get('facenet', 0) + (time.perf_counter() - t_facenet) * 1000
-                            
-                            # --- DB SEARCH ---
-                            t_db = time.perf_counter()
-                            sid, name, score = recognize_face(emb)
-                            db_compare_count += sum(len(v["embeddings"]) for v in global_face_db.values())
-                            timers['db_search'] = timers.get('db_search', 0) + (time.perf_counter() - t_db) * 1000
-
-                            if sid:
-                                person["student_id"] = sid
-                                person["name"] = name
-                                person["status"] = "known"
-                                person["last_recognized"] = current_time
-                                
-                                existing = global_face_db[sid]["embeddings"]
-                                
-                                # ACTIVE LEARNING: Save good new angles to PostgreSQL
-                                if (0.72 < score < 0.94 and 
-                                    probs_arr[best_idx] > 0.85 and
-                                    len(existing) < 8):
-                                    
-                                    if len(existing) > 0:
-                                        sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing]
-                                        if max(sims_to_existing) > 0.85:
-                                            pass  # Too similar, skip
-                                        else:
-                                            lm = landmarks_arr[best_idx]
-                                            left_eye, right_eye, nose = lm[0], lm[1], lm[2]
-                                            dist_left = np.linalg.norm(nose - left_eye)
-                                            dist_right = np.linalg.norm(nose - right_eye)
-                                            symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
-                                            
-                                            if symmetry > 0.60:
-                                                # Add to runtime cache
-                                                existing.append(emb.tolist())
-                                                pg_save_required = True  # Mark for PostgreSQL save
-                                                
-                                                session_stats["embeddings_added"][sid] = session_stats["embeddings_added"].get(sid, 0) + 1
-                                                session_stats["avg_symmetry"].append(symmetry)
-                                                if session_stats["start_time"] is None:
-                                                    session_stats["start_time"] = time.time()
-                                                
-                                                print(f"🧠 ACTIVE LEARN: New angle for {name} (sym: {symmetry:.2f}, count: {len(existing)})")
-                                            else:
-                                                session_stats["rejected_by_symmetry"] += 1
-                                    else:
-                                        pass
+                    # 🛑 IDENTITY STEALING (BIPARTITE MATCHING)
+                    if sid:
+                        for other_tid, other_data in list(live_tracker_memory.items()):
+                            if other_tid != track_id and other_data.get("student_id") == sid:
+                                if score > other_data.get("match_score", 0):
+                                    other_data["student_id"] = None
+                                    other_data["name"] = "Unknown"
+                                    other_data["status"] = "unknown"
+                                    other_data["match_score"] = 0
                                 else:
-                                    if not (0.72 < score < 0.94) and len(existing) < 8:
-                                        session_stats["rejected_by_score"] += 1
-                            else:
-                                person["student_id"] = None
-                                person["name"] = "Unknown"
-                                person["status"] = "unknown"
+                                    sid, name, score = None, "Unknown", -1.0
+                                    break
+                                    
+                    if sid:
+                        person["student_id"] = sid
+                        person["name"] = name
+                        person["status"] = "known"
+                        person["match_score"] = score
+                        person["last_recognized"] = current_time
+                        
+                        existing = global_face_db[sid]["embeddings"]
+                        
+                        # ACTIVE LEARNING
+                        if score < 0.85 and best_face.det_score > 0.85 and len(existing) < 15:
+                            sims_to_existing = [cosine_similarity(emb.tolist(), e) for e in existing] if existing else [0]
+                            if max(sims_to_existing) <= 0.80:
+                                kps = best_face.kps
+                                dist_left = np.linalg.norm(kps[2] - kps[0])
+                                dist_right = np.linalg.norm(kps[2] - kps[1])
+                                symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
+                                
+                                if symmetry > 0.60:
+                                    existing.append(emb.tolist())
+                                    pg_save_required = True 
+                    else:
+                        person["student_id"] = None
+                        person["name"] = "Unknown"
+                        person["status"] = "unknown"
 
             if not face_found:
                 person["frames_no_face"] += 1
                 if person["frames_no_face"] > 3:
-                    person["student_id"] = None
-                    person["name"] = "No Face"
                     person["status"] = "no_face"
+                    person["name"] = "No Face"
+                    
             person["last_processed"] = current_time
             current_frame_tracks[track_id] = person
+            faces_out.append({"box": [x1, y1, x2 - x1, y2 - y1], "track_id": track_id, "student_id": person.get("student_id"), "name": person.get("name"), "status": person.get("status")})
 
-            if person["status"] != "no_face":
-                face_out = {
-                    "box": [x1, y1, x2 - x1, y2 - y1],
-                    "track_id": track_id,
-                    "student_id": person["student_id"],
-                    "name": person["name"],
-                    "status": person["status"]
-                }
-                if face_abs_box:
-                    face_out["face_box"] = face_abs_box
-                faces_out.append(face_out)
+    live_tracker_memory = {tid: tdata for tid, tdata in current_frame_tracks.items() if (current_time - tdata.get("last_seen", 0)) < 10.0}
 
-    for tid, tdata in current_frame_tracks.items():
-        live_tracker_memory[tid] = tdata
-    
-    live_tracker_memory = {
-        tid: tdata for tid, tdata in live_tracker_memory.items()
-        if (current_time - tdata.get("last_seen", 0)) < 10.0
-    }
-
-    # ☁️ ACTIVE LEARNING: Save new angles to PostgreSQL (batch save)
+    # ☁️ ACTIVE LEARNING SAVE
     if pg_save_required:
-        t_save = time.perf_counter()
         try:
             conn = get_pg_db()
             cur = conn.cursor()
-            
             for sid, data in global_face_db.items():
-                # Get current PG count
                 cur.execute('SELECT COUNT(*) FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (sid,))
                 pg_count = cur.fetchone()[0]
                 
-                # Get embeddings that are in runtime cache but might not be in PG
-                # For simplicity, we check the last added one
                 runtime_embs = data["embeddings"]
-                if len(runtime_embs) > pg_count and pg_count < 8:
-                    # Save the newest embedding
+                if len(runtime_embs) > pg_count and pg_count < 15:
                     newest_emb = runtime_embs[-1]
-                    cur.execute('''
-                        INSERT INTO "Att_FaceEmbeddings" 
-                        ("StudentID", "Embedding", "QualityScore", "Symmetry")
-                        VALUES (%s, %s, %s, %s)
-                    ''', (sid, newest_emb, 0.85, 0.80))
-                    print(f"☁️ Active learning: saved new angle for {data['name']} to PostgreSQL")
-            
+                    cur.execute('''INSERT INTO "Att_FaceEmbeddings" ("StudentID", "Embedding", "QualityScore", "Symmetry") VALUES (%s, %s, %s, %s)''', (sid, newest_emb, 0.85, 0.80))
             conn.commit()
             cur.close()
             conn.close()
-        except Exception as e:
-            print(f"⚠️ Failed to save active learning to PostgreSQL: {e}")
-        
-        timers['db_save'] = (time.perf_counter() - t_save) * 1000
-
-    # --- PROFILING REPORT ---
-    total = (time.perf_counter() - t_start) * 1000
-    mem_after = process.memory_info().rss / 1024 / 1024
-    mem_delta = mem_after - mem_before
-    
-    if not hasattr(process_frame, "_frame_counter"):
-        process_frame._frame_counter = 0
-    process_frame._frame_counter += 1
-    
-    if facenet_runs > 0 or process_frame._frame_counter % 30 == 0:
-        print(f"\n{'='*60}")
-        print(f"📊 FRAME {process_frame._frame_counter} | People:{len(boxes)} | Total:{total:.1f}ms")
-        print(f"   Base64/Decode : {timers.get('decode',0):>6.1f}ms")
-        print(f"   YOLO Track    : {timers.get('yolo',0):>6.1f}ms")
-        print(f"   Head Crop     : {timers.get('crop',0):>6.1f}ms")
-        print(f"   YuNet Detect  : {timers.get('yunet_detect',0):>6.1f}ms ({yunet_detect_runs}x)")
-        print(f"   YuNet Extract : {timers.get('yunet_extract',0):>6.1f}ms ({yunet_extract_runs}x)")
-        print(f"   🔴 FaceNet    : {timers.get('facenet',0):>6.1f}ms ({facenet_runs}x)")
-        print(f"   🔴 DB Search   : {timers.get('db_search',0):>6.1f}ms ({db_compare_count} comparisons)")
-        print(f"   DB Save       : {timers.get('db_save',0):>6.1f}ms")
-        print(f"   Memory        : {mem_after:.0f}MB (Δ{mem_delta:+.0f}MB)")
-        print(f"{'='*60}")
+        except Exception: pass
 
     return faces_out
 
-@app.websocket("/ws/surveillance")
-async def ws_surveillance(ws: WebSocket):
-    await ws.accept()
-    global live_tracker_memory
-    live_tracker_memory.clear()
-    
-    try:
-        while True:
-            data = await ws.receive_json()
-            faces = await asyncio.to_thread(process_frame, data["image"])
-            await ws.send_json({"status": "success", "faces": faces})
-    except WebSocketDisconnect:
-        pass  # Normal disconnect
-    except Exception as e:
-        print(f"⚠️ WebSocket error: {e}")
-    finally:
-        live_tracker_memory.clear()
-        # Suppress Windows Proactor error on connection close
-        try:
-            await ws.close()
-        except Exception:
-            pass
-
-# =========================================================
-# QUICK ASSIGN (TEACHER CLICK)
-# =========================================================
 class AssignPayload(BaseModel):
     student_id: str
     student_name: str
@@ -1117,199 +879,82 @@ class AssignPayload(BaseModel):
     
 @app.post("/api/assign-face")
 def assign_face(p: AssignPayload):
-    if "," in p.image: 
-        p.image = p.image.split(",")[1]
+    if "," in p.image: p.image = p.image.split(",")[1]
     
     try:
-        img = Image.open(io.BytesIO(base64.b64decode(p.image))).convert("RGB")
+        img_bytes = base64.b64decode(p.image)
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image data.")
     
-    # MANUAL ZOOM: image is already a magnified face crop
     if p.is_manual or not p.box:
-        if max(img.size) > 1200:
-            img.thumbnail((800, 800))
+        if max(img.size) > 1200: img.thumbnail((800, 800))
         head_crop = img
     else:
-        # YOLO TRACKING: existing body-box to head-crop logic
         x, y, w, h = map(int, p.box)
-        head_h = int(h * 0.50)
-        hx1 = max(0, x - 20)
-        hy1 = max(0, y - 20)
-        hx2 = min(img.width, x + w + 20)
-        hy2 = min(img.height, y + head_h + 20)
-        
-        if hx2 <= hx1 or hy2 <= hy1:
-            raise HTTPException(status_code=400, detail="Invalid face region.")
-        
+        head_h = int(h * 0.70)
+        hx1, hy1 = max(0, x - 20), max(0, y - 20)
+        hx2, hy2 = min(img.width, x + w + 20), min(img.height, y + head_h + 20)
         head_crop = img.crop((hx1, hy1, hx2, hy2))
     
-    # --- YUNET DETECTION ---
-    f_boxes, f_probs, f_landmarks = mtcnn.detect(head_crop, landmarks=True)
+    head_crop_bgr = np.array(head_crop)[:, :, ::-1]
     
-    if f_boxes is None or len(f_boxes) == 0 or f_boxes[0] is None:
+    with ai_lock:
+        faces = face_app.get(head_crop_bgr)
+        
+    if not faces:
         raise HTTPException(status_code=400, detail="No face detected. Ask student to look at camera.")
     
-    boxes_raw = f_boxes[0]
-    probs_raw = f_probs[0]
-    landmarks_raw = f_landmarks[0]
+    if p.is_manual and len(faces) > 1:
+        raise HTTPException(status_code=400, detail=f"Multiple faces detected. Please zoom closer on one student.")
     
-    boxes_arr = np.array(boxes_raw)
-    if boxes_arr.ndim == 1: 
-        boxes_arr = boxes_arr.reshape(1, 4)
-    probs_arr = np.array(probs_raw)
-    if probs_arr.ndim == 0: 
-        probs_arr = probs_arr.reshape(1)
-    landmarks_arr = np.array(landmarks_raw)
-    if landmarks_arr.ndim == 2: 
-        landmarks_arr = landmarks_arr.reshape(1, 5, 2)
+    best_face = sorted(faces, key=lambda x: x.det_score, reverse=True)[0]
     
-    # MANUAL ZOOM: Reject if multiple faces in crop
-    if p.is_manual and len(boxes_arr) > 1:
-        high_conf_count = sum(1 for prob in probs_arr if prob > 0.90)
-        if high_conf_count > 1:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Multiple faces detected in zoom ({high_conf_count} found). Please zoom closer on one student only."
-            )
-    
-    best_idx = int(np.argmax(probs_arr))
-    
-    # QUALITY GATES
-    if probs_arr[best_idx] < 0.80:
-        raise HTTPException(status_code=400, detail=f"Face too unclear ({probs_arr[best_idx]:.2f}). Ask student to look directly at camera.")
-    
-    # Frontal check
-    lm = landmarks_arr[best_idx]
-    left_eye, right_eye, nose = lm[0], lm[1], lm[2]
-    dist_left = np.linalg.norm(nose - left_eye)
-    dist_right = np.linalg.norm(nose - right_eye)
+    if best_face.det_score < 0.60:
+        raise HTTPException(status_code=400, detail=f"Face too unclear ({best_face.det_score:.2f}).")
+        
+    kps = best_face.kps
+    dist_left = np.linalg.norm(kps[2] - kps[0])
+    dist_right = np.linalg.norm(kps[2] - kps[1])
     symmetry = min(dist_left, dist_right) / (max(dist_left, dist_right) + 1e-6)
     
-    if symmetry < 0.70:
-        raise HTTPException(status_code=400, detail=f"Face not frontal enough ({symmetry:.2f}). Ask student to face camera.")
+    if symmetry < 0.65:
+        raise HTTPException(status_code=400, detail=f"Face not frontal enough ({symmetry:.2f}).")
+        
+    raw_emb = best_face.embedding
+    emb = get_face_embedding(raw_emb)
     
-    # Extract embedding
-    best_box = boxes_arr[best_idx:best_idx+1]
-    extracted = mtcnn.extract(head_crop, best_box, save_path=None)
-    
-    if extracted is None:
-        face_tensors = []
-    elif isinstance(extracted, torch.Tensor):
-        face_tensors = [extracted]
-    else:
-        face_tensors = extracted
-    
-    if len(face_tensors) == 0:
-        raise HTTPException(status_code=400, detail="Face extraction failed.")
-    
-    face_tensor = face_tensors[0]
-    emb = get_face_embedding(face_tensor)
-    
-    # IDENTITY CONSISTENCY
     if p.student_id in global_face_db and len(global_face_db[p.student_id]["embeddings"]) > 0:
         existing_embs = global_face_db[p.student_id]["embeddings"]
         sims_to_self = [cosine_similarity(emb.tolist(), e) for e in existing_embs]
-        max_self_sim = max(sims_to_self)
-        if max_self_sim < 0.55:
-            return {
-                "status": "error",
-                "message": f"🚫 IDENTITY MISMATCH: This face does not match existing biometric record for {global_face_db[p.student_id]['name']}.",
-                "max_similarity_to_record": round(max_self_sim, 3)
-            }
+        if max(sims_to_self) < 0.40:
+            return {"status": "error", "message": f"🚫 IDENTITY MISMATCH: This face does not match existing record."}
     
-    # DUPLICATE FACE CHECK
-    DUPLICATE_THRESHOLD = 0.75
-    for existing_id, existing_data in global_face_db.items():
-        if existing_id == p.student_id:
-            continue
-        for saved_emb in existing_data["embeddings"]:
-            sim = cosine_similarity(emb.tolist(), saved_emb)
-            if sim > DUPLICATE_THRESHOLD:
-                return {
-                    "status": "error",
-                    "message": f"🚫 DUPLICATE FACE: This face already belongs to {existing_data['name']} (ID: {existing_id}).",
-                    "existing_student_id": existing_id,
-                    "existing_name": existing_data["name"],
-                    "similarity": round(sim, 3)
-                }
-    
-    # ☁️ SAVE TO POSTGRESQL ONLY
-    conn = None
-    cur = None
-    count = 0  # ← DEFINED HERE for use in return statement
-    
+    count = 0
     try:
         conn = get_pg_db()
         cur = conn.cursor()
-        
-        # Count existing embeddings
         cur.execute('SELECT COUNT(*) FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (p.student_id,))
         count = cur.fetchone()[0]
         
-        if count >= 8:
-            return {
-                "status": "success",
-                "message": f"{p.student_name} already has maximum biometric data (8 angles).",
-                "quality": "maxed",
-                "total_embeddings": count
-            }
-        
-        # Check redundancy
-        cur.execute('SELECT "Embedding" FROM "Att_FaceEmbeddings" WHERE "StudentID" = %s', (p.student_id,))
-        existing_rows = cur.fetchall()
-        
-        for (existing_emb,) in existing_rows:
-            if cosine_similarity(emb.tolist(), existing_emb) > 0.90:
-                return {
-                    "status": "success",
-                    "message": f"{p.student_name} already enrolled with similar angle.",
-                    "quality": "redundant",
-                    "total_embeddings": count
-                }
-        
-        # Insert new embedding
-        cur.execute('''
-            INSERT INTO "Att_FaceEmbeddings" 
-            ("StudentID", "Embedding", "QualityScore", "Symmetry", "SourceClassNbr")
-            VALUES (%s, %s, %s, %s, %s)
-        ''', (p.student_id, emb.tolist(), float(probs_arr[best_idx]), float(symmetry), p.class_nbr))
-        
-        conn.commit()
-        print(f"☁️ Saved embedding {count+1}/8 for {p.student_name} to PostgreSQL")
-        
+        if count < 15:
+            cur.execute('''INSERT INTO "Att_FaceEmbeddings" ("StudentID", "Embedding", "QualityScore", "Symmetry", "SourceClassNbr")
+                           VALUES (%s, %s, %s, %s, %s)''', 
+                        (p.student_id, emb.tolist(), float(best_face.det_score), float(symmetry), p.class_nbr))
+            conn.commit()
+        cur.close()
+        conn.close()
     except Exception as e:
-        if cur: cur.close()
-        if conn: conn.close()
-        print(f"⚠️ Failed to save to PostgreSQL: {e}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
     
-    # Update runtime cache immediately (so next frame recognizes)
     if p.student_id not in global_face_db:
         global_face_db[p.student_id] = {"name": p.student_name, "embeddings": []}
-    
     global_face_db[p.student_id]["embeddings"].append(emb.tolist())
     
-    # Cap runtime cache to 8
-    if len(global_face_db[p.student_id]["embeddings"]) > 8:
-        global_face_db[p.student_id]["embeddings"] = global_face_db[p.student_id]["embeddings"][:8]
-    
-    # Clear tracker so next frame recognizes immediately
     global live_tracker_memory
     live_tracker_memory.clear()
     
-    return {
-        "status": "success",
-        "message": f"✅ {p.student_name} enrolled successfully.",
-        "quality": "excellent",
-        "symmetry": round(float(symmetry), 3),
-        "confidence": round(float(probs_arr[best_idx]), 3),
-        "total_embeddings": count + 1 
-    }
-
+    return {"status": "success", "message": f"✅ {p.student_name} enrolled successfully.", "quality": "excellent", "total_embeddings": count + 1}
 
 
 
