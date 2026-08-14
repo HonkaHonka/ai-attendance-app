@@ -39,6 +39,15 @@ from fastapi import Request
 import psycopg2
 from pgvector.psycopg2 import register_vector
 import threading
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="insightface")
+
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+# Optional: stop the noisy atexit traceback on Ctrl+C
+import atexit, torch._dynamo.utils as _du
+if hasattr(_du, 'dump_compile_times'):
+    atexit.unregister(_du.dump_compile_times)
 # =========================================================
 # APP SETUP
 # =========================================================
@@ -53,7 +62,8 @@ app.add_middleware(
 )
 
 from concurrent.futures import ThreadPoolExecutor
-
+_prev_person_count = 0
+_zoom_recovery_until = 0.0
 # Create a thread pool so heavy AI processing doesn't block the async event loop
 ws_executor = ThreadPoolExecutor(max_workers=2)
 
@@ -66,17 +76,19 @@ async def websocket_surveillance(websocket: WebSocket):
             data = await websocket.receive_json()
             image_b64 = data.get("image", "")
             
-            # Run CPU-heavy CV in a background thread to keep the event loop alive
-            faces = await asyncio.get_event_loop().run_in_executor(
-                ws_executor, process_frame, image_b64
-            )
-            
-            await websocket.send_json({"faces": faces})
+            try:
+                faces = await asyncio.get_event_loop().run_in_executor(
+                    ws_executor, process_frame, image_b64
+                )
+                await websocket.send_json({"faces": faces})
+            except Exception as e:
+                print(f"⚠️ Frame processing error (skipped): {e}")
+                await websocket.send_json({"faces": []})
             
     except WebSocketDisconnect:
         print("🔌 WebSocket client disconnected")
     except Exception as e:
-        print(f"⚠️ WebSocket error: {e}")
+        print(f"⚠️ WebSocket transport error: {e}")
     finally:
         try:
             await websocket.close()
@@ -112,7 +124,7 @@ def get_local_ip():
 print("🔹 Loading InsightFace (ArcFace 512D + RetinaFace)...")
 # buffalo_l contains the best detection and recognition models natively!
 face_app = FaceAnalysis(name='buffalo_l', allowed_modules=['detection', 'recognition'])
-face_app.prepare(ctx_id=-1, det_size=(320, 320))
+face_app.prepare(ctx_id=-1, det_size=(256, 256))
 ai_lock = threading.Lock() # 🚦 Traffic light to prevent thread crashes
 print("✅ InsightFace Models Loaded Successfully!")
 
@@ -686,7 +698,7 @@ def recognize_face(emb):
 
 
 def process_frame(image_b64):
-    global live_tracker_memory
+    global live_tracker_memory, _prev_person_count, _zoom_recovery_until
     t_start = time.perf_counter()
 
     if not image_b64: return []
@@ -710,27 +722,47 @@ def process_frame(image_b64):
     current_frame_tracks = {}
     pg_save_required = False  
     current_time = time.time()
-
-    # 🛑 ANTI-CLONE SET
     seen_sids_this_frame = set()
 
-    # 🚦 HEARTBEAT THROTTLE: Max 1 Heavy AI run per frame!
-    heavy_ai_runs_this_frame = 0  
-    MAX_HEAVY_AI = 1    
+    # --- ZOOM DETECTION & THROTTLE ---
+    current_count = 0
+    if results and results[0].boxes is not None and results[0].boxes.id is not None:
+        current_count = len(results[0].boxes)
+        
+        # Detect sudden zoom-out (e.g. 3 people → 12 people)
+        if (_prev_person_count > 0 and 
+            current_count >= _prev_person_count * 2 and 
+            current_count >= 5):
+            _zoom_recovery_until = current_time + 3.0
+            print(f"🔍 Zoom-out burst: {current_count} people. Recovering...")
+        _prev_person_count = current_count
+        
+        # STRICT: never more than 2 heavy AI calls per frame
+        MAX_HEAVY_AI = 2
+    else:
+        MAX_HEAVY_AI = 1
 
     if results and results[0].boxes is not None and results[0].boxes.id is not None:
         boxes = results[0].boxes.xyxy.cpu().numpy()
         track_ids = results[0].boxes.id.cpu().numpy()
 
-        # PASS 1: Reserve identities
+        # PASS 1: Reserve known identities
         for box, track_id in zip(boxes, track_ids):
             person = live_tracker_memory.get(int(track_id))
             if person and person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 10.0:
                 if person.get("student_id"):
                     seen_sids_this_frame.add(person["student_id"])
 
-        # PASS 2: Process boxes
-        for box, track_id in zip(boxes, track_ids):
+        # PASS 2: Sort by box size — largest (closest) faces first
+        box_data = list(zip(boxes, track_ids))
+        box_data.sort(
+            key=lambda x: (x[0][2] - x[0][0]) * (x[0][3] - x[0][1]),
+            reverse=True
+        )
+
+        heavy_ai_runs_this_frame = 0
+
+        for box, track_id in box_data:
             if np.isnan(box).any(): continue
             x1, y1, x2, y2 = map(int, box)
             track_id = int(track_id)
@@ -743,7 +775,7 @@ def process_frame(image_b64):
             })
             person["last_seen"] = current_time
 
-            # FAST PATH 1: Known
+            # FAST PATH 1: Known and fresh
             if person.get("status") == "known" and (current_time - person.get("last_recognized", 0)) < 10.0:
                 if (current_time - person.get("last_face_seen", 0)) > 3.0:
                     person["status"] = "no_face"
@@ -753,19 +785,41 @@ def process_frame(image_b64):
                         seen_sids_this_frame.remove(person["student_id"])
                 
                 current_frame_tracks[track_id] = person
-                faces_out.append({"box": [x1, y1, x2 - x1, y2 - y1], "track_id": track_id, "student_id": person["student_id"] if person["status"] == "known" else None, "name": person["name"], "status": person["status"]})
+                faces_out.append({
+                    "box": [x1, y1, x2 - x1, y2 - y1], 
+                    "track_id": track_id, 
+                    "student_id": person["student_id"] if person["status"] == "known" else None, 
+                    "name": person["name"], 
+                    "status": person["status"]
+                })
                 continue
 
-            # FAST PATH 2: Unknown recently
-            if person.get("status") == "unknown" and (current_time - person.get("last_processed", 0)) < 5.0:
+                        # FAST PATH 2: Unknown retry — 1.5s normally, 0.3s during zoom-out burst
+            unknown_lockout = 1.5
+            if current_time < _zoom_recovery_until:
+                unknown_lockout = 0.3
+            
+            if person.get("status") == "unknown" and (current_time - person.get("last_processed", 0)) < unknown_lockout:
                 current_frame_tracks[track_id] = person
-                faces_out.append({"box": [x1, y1, x2 - x1, y2 - y1], "track_id": track_id, "student_id": None, "name": "Unknown", "status": "unknown"})
+                faces_out.append({
+                    "box": [x1, y1, x2 - x1, y2 - y1], 
+                    "track_id": track_id, 
+                    "student_id": None, 
+                    "name": "Unknown", 
+                    "status": "unknown"
+                })
                 continue
 
-            # HEARTBEAT THROTTLE
+            # HEARTBEAT THROTTLE: Max 2 InsightFace runs per frame
             if heavy_ai_runs_this_frame >= MAX_HEAVY_AI:
                 current_frame_tracks[track_id] = person
-                faces_out.append({"box": [x1, y1, x2 - x1, y2 - y1], "track_id": track_id, "student_id": None, "name": "Scanning...", "status": "scanning"})
+                faces_out.append({
+                    "box": [x1, y1, x2 - x1, y2 - y1], 
+                    "track_id": track_id, 
+                    "student_id": None, 
+                    "name": "Scanning...", 
+                    "status": "scanning"
+                })
                 continue
             
             heavy_ai_runs_this_frame += 1
@@ -810,7 +864,7 @@ def process_frame(image_b64):
                                 else:
                                     sid, name, score = None, "Unknown", -1.0
                                     break
-                                    
+                    
                     if sid:
                         person["student_id"] = sid
                         person["name"] = name
@@ -845,9 +899,16 @@ def process_frame(image_b64):
                     
             person["last_processed"] = current_time
             current_frame_tracks[track_id] = person
-            faces_out.append({"box": [x1, y1, x2 - x1, y2 - y1], "track_id": track_id, "student_id": person.get("student_id"), "name": person.get("name"), "status": person.get("status")})
+            faces_out.append({
+                "box": [x1, y1, x2 - x1, y2 - y1], 
+                "track_id": track_id, 
+                "student_id": person.get("student_id"), 
+                "name": person.get("name"), 
+                "status": person.get("status")
+            })
 
-    live_tracker_memory = {tid: tdata for tid, tdata in current_frame_tracks.items() if (current_time - tdata.get("last_seen", 0)) < 10.0}
+    live_tracker_memory = {tid: tdata for tid, tdata in current_frame_tracks.items() 
+                           if (current_time - tdata.get("last_seen", 0)) < 10.0}
 
     # ☁️ ACTIVE LEARNING SAVE
     if pg_save_required:

@@ -6,7 +6,7 @@ from email.mime.multipart import MIMEMultipart
 
 # Your Gmail credentials
 GMAIL_USER = "aminopmarzouk@gmail.com"      # ← Change this
-GMAIL_APP_PASSWORD = "xxxx"  # ← Paste your 16-char App Password (remove spaces)
+GMAIL_APP_PASSWORD = "ydpu vjbs jmzg odbv"  # ← Paste your 16-char App Password (remove spaces)
 
 def send_verification_email(to_email: str, teacher_name: str, verify_url: str):
     """Send verification email using Gmail SMTP + App Password."""

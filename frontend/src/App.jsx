@@ -19,8 +19,8 @@ const ENROLL_CONSTRAINTS = {
   width: 1280, height: 720
 };
 
-const AI_W = 1280;
-const AI_H = 720;
+const AI_W = 1600;
+const AI_H = 900;
 
 function App() {
   console.log('App rendering');
