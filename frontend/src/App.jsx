@@ -1407,25 +1407,25 @@ useEffect(() => {
           
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', overflow: 'hidden' }}>
             
-            <div style={{ position: 'relative', width: '100%', maxHeight: '100%', aspectRatio: '16/9', display: 'flex', justifyContent: 'center' }}>
-              <Webcam 
-                ref={surveillanceWebcamRef} 
-                audio={false} 
-                mirrored={false} 
-                screenshotFormat="image/jpeg" 
-                videoConstraints={SURVEILLANCE_CONSTRAINTS} 
-                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'contain' }}
-              />
-              <canvas 
-                ref={canvasRef} 
-                width={AI_W} 
-                height={AI_H}
-                onClick={handleCanvasClick}
-                onContextMenu={handleCanvasRightClick}
-                onWheel={handleCanvasWheel}
-                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 10, cursor: 'crosshair' }} 
-              />
-            </div>
+            <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+  <Webcam 
+    ref={surveillanceWebcamRef} 
+    audio={false} 
+    mirrored={false} 
+    screenshotFormat="image/jpeg" 
+    videoConstraints={SURVEILLANCE_CONSTRAINTS} 
+    style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+  />
+  <canvas 
+    ref={canvasRef} 
+    width={AI_W} 
+    height={AI_H}
+    onClick={handleCanvasClick}
+    onContextMenu={handleCanvasRightClick}
+    onWheel={handleCanvasWheel}
+    style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', zIndex: 10, cursor: 'crosshair' }} 
+  />
+</div>
                                     {/* 📋 ROSTER TOGGLE BUTTON */}
             <button
               onClick={() => setIsRosterVisible(!isRosterVisible)}
