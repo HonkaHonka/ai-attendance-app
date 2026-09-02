@@ -6,9 +6,9 @@ import openvino as ov
 _original_compile_model = ov.Core.compile_model
 
 def _patched_compile_model(self, model, device_name=None, config=None):
-    # 🎯 FIX: Force YOLO to stay on the CPU!
-    print(f"🔄 OpenVINO device override: {device_name} → CPU")
-    device_name = "CPU"
+    if device_name in ("AUTO", "AUTO:CPU,GPU", "AUTO:GPU,CPU", None, "CPU"):
+        print(f"🔄 OpenVINO device override: {device_name} → GPU")
+        device_name = "GPU"
     return _original_compile_model(self, model, device_name, config)
 
 ov.Core.compile_model = _patched_compile_model
@@ -121,23 +121,12 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
-print("🔹 Loading InsightFace (MobileFaceNet) on Intel GPU via OpenVINO...")
-
-# 🎯 FIX: We use OpenVINOExecutionProvider and target the GPU!
-openvino_provider_options = {
-    'device_type': 'GPU' # Forces OpenVINO to use the Intel Iris Xe
-}
-
-face_app = FaceAnalysis(
-    name='buffalo_s', 
-    allowed_modules=['detection', 'recognition'],
-    providers=[('OpenVINOExecutionProvider', openvino_provider_options), 'CPUExecutionProvider']
-)
-
-# Keep the small 160x160 det_size for maximum speed
-face_app.prepare(ctx_id=0, det_size=(160, 160)) 
-ai_lock = threading.Lock() 
-print("✅ InsightFace Models Loaded on OpenVINO GPU Successfully!")
+print("🔹 Loading InsightFace (ArcFace 512D + RetinaFace)...")
+# buffalo_l contains the best detection and recognition models natively!
+face_app = FaceAnalysis(name='buffalo_s', allowed_modules=['detection', 'recognition'])
+face_app.prepare(ctx_id=-1, det_size=(160, 160))
+ai_lock = threading.Lock() # 🚦 Traffic light to prevent thread crashes
+print("✅ InsightFace Models Loaded Successfully!")
 
 
 
@@ -844,12 +833,9 @@ def process_frame(image_b64):
             head_crop = img.crop((hx1, hy1, hx2, hy2))
             head_crop_bgr = np.array(head_crop)[:, :, ::-1]
 
-            # 🎯 FIX: Force static tensor shape to prevent DirectML crash!
-            head_crop_static = cv2.resize(head_crop_bgr, (160, 160))
-
             # --- INSIGHTFACE DETECT & EXTRACT ---
             with ai_lock:
-                detected_faces = face_app.get(head_crop_static)
+                detected_faces = face_app.get(head_crop_bgr)
             
             face_found = False
             
@@ -974,11 +960,8 @@ def assign_face(p: AssignPayload):
     
     head_crop_bgr = np.array(head_crop)[:, :, ::-1]
     
-    # 🎯 FIX: Force static tensor shape to prevent DirectML crash!
-    head_crop_static = cv2.resize(head_crop_bgr, (160, 160))
-    
     with ai_lock:
-        faces = face_app.get(head_crop_static)
+        faces = face_app.get(head_crop_bgr)
         
     if not faces:
         raise HTTPException(status_code=400, detail="No face detected. Ask student to look at camera.")
