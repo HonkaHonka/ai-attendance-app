@@ -121,16 +121,17 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
-print("🔹 Loading InsightFace on Intel iGPU (OpenVINO EP)...")
+print("🔹 Loading InsightFace (MobileFaceNet) on INTEL GPU...")
+# 🎯 FIX: Use DirectML and buffalo_s
 face_app = FaceAnalysis(
-    name='buffalo_s',
+    name='buffalo_s', 
     allowed_modules=['detection', 'recognition'],
-    providers=['OpenVINOExecutionProvider', 'CPUExecutionProvider'],
-    provider_options=[{'device_type': 'GPU'}]  # Intel iGPU
+    providers=['DmlExecutionProvider', 'CPUExecutionProvider']
 )
+# Force strict 160x160 size
 face_app.prepare(ctx_id=0, det_size=(160, 160))
-ai_lock = threading.Lock()
-print("✅ InsightFace loaded on Intel GPU via OpenVINO EP")
+ai_lock = threading.Lock() # 🚦 Traffic light to prevent thread crashes
+print("✅ InsightFace Models Loaded Successfully!")
 
 
 
@@ -603,7 +604,8 @@ def enroll_face(payload: EnrollPayload):
                 img = Image.open(io.BytesIO(base64.b64decode(b64_str))).convert('RGB')
                 img_bgr = np.array(img)[:, :, ::-1] # InsightFace needs BGR
                 
-                faces = safe_face_detect(img_bgr)
+                with ai_lock:
+                    faces = face_app.get(img_bgr)
                     
                 if faces:
                     best_face = sorted(faces, key=lambda x: x.det_score, reverse=True)[0]
@@ -644,7 +646,8 @@ def verify_face(payload: VerifyPayload):
         img = Image.open(io.BytesIO(base64.b64decode(b64_str))).convert('RGB')
         img_bgr = np.array(img)[:, :, ::-1]
         
-        faces = safe_face_detect(img_bgr)
+        with ai_lock:
+            faces = face_app.get(img_bgr)
             
         if not faces: raise ValueError("No face detected")
         live_embedding = get_face_embedding(faces[0].embedding)
@@ -697,36 +700,6 @@ def recognize_face(emb):
         return best_id, best_name, best_score
     return None, "Unknown", best_score
 
-
-def _pad_to_32(img_bgr):
-    """DirectML workaround: pad so H and W are multiples of 32."""
-    h, w = img_bgr.shape[:2]
-    new_h = ((h + 31) // 32) * 32
-    new_w = ((w + 31) // 32) * 32
-    if new_h == h and new_w == w:
-        return img_bgr
-    padded = np.full((new_h, new_w, 3), (114, 114, 114), dtype=np.uint8)  # gray pad
-    padded[:h, :w] = img_bgr
-    return padded
-
-def safe_face_detect(img_bgr, det_thresh=0.5):
-    """Wrapper that pads for DML and catches the Reshape bug gracefully."""
-    if img_bgr is None or img_bgr.size == 0:
-        return []
-    h, w = img_bgr.shape[:2]
-    if h < 32 or w < 32:
-        return []  # too small anyway
-    
-    safe_img = _pad_to_32(img_bgr)
-    
-    try:
-        faces = safe_face_detect(img_bgr)
-    except Exception as e:
-        err = str(e)
-        if "Reshape" in err or "DmlExecutionProvider" in err or "80070057" in err:
-            print(f"⚠️ DML bug on {w}x{h} crop, skipped.")
-            return []
-        raise
 
 
 def process_frame(image_b64):
@@ -865,9 +838,12 @@ def process_frame(image_b64):
             head_crop = img.crop((hx1, hy1, hx2, hy2))
             head_crop_bgr = np.array(head_crop)[:, :, ::-1]
 
+            # 🎯 FIX: Force static tensor shape to prevent DirectML crash!
+            head_crop_static = cv2.resize(head_crop_bgr, (160, 160))
+
             # --- INSIGHTFACE DETECT & EXTRACT ---
-            
-            detected_faces = safe_face_detect(head_crop_bgr)
+            with ai_lock:
+                detected_faces = face_app.get(head_crop_static)
             
             face_found = False
             
@@ -992,7 +968,11 @@ def assign_face(p: AssignPayload):
     
     head_crop_bgr = np.array(head_crop)[:, :, ::-1]
     
-    faces = safe_face_detect(head_crop_bgr)
+    # 🎯 FIX: Force static tensor shape to prevent DirectML crash!
+    head_crop_static = cv2.resize(head_crop_bgr, (160, 160))
+    
+    with ai_lock:
+        faces = face_app.get(head_crop_static)
         
     if not faces:
         raise HTTPException(status_code=400, detail="No face detected. Ask student to look at camera.")
