@@ -11,7 +11,8 @@ const WS_BASE = `ws://${HOST}:8000/ws`;
 const SURVEILLANCE_CONSTRAINTS = {
   facingMode: "user",
   width: { ideal: 1920 },
-  height: { ideal: 1080 }
+  height: { ideal: 1080 },
+  frameRate: { ideal: 12, max: 15 } // 🚦 NEW: Tell the camera hardware to relax!
 };
 
 const ENROLL_CONSTRAINTS = {
@@ -19,8 +20,8 @@ const ENROLL_CONSTRAINTS = {
   width: 1280, height: 720
 };
 
-const AI_W = 1600;
-const AI_H = 900;
+const AI_W = 960;
+const AI_H = 540;
 
 function App() {
   console.log('App rendering');

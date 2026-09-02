@@ -65,7 +65,7 @@ from concurrent.futures import ThreadPoolExecutor
 _prev_person_count = 0
 _zoom_recovery_until = 0.0
 # Create a thread pool so heavy AI processing doesn't block the async event loop
-ws_executor = ThreadPoolExecutor(max_workers=2)
+ws_executor = ThreadPoolExecutor(max_workers=1)
 
 @app.websocket("/ws/surveillance")
 async def websocket_surveillance(websocket: WebSocket):
@@ -123,8 +123,8 @@ def get_local_ip():
 
 print("🔹 Loading InsightFace (ArcFace 512D + RetinaFace)...")
 # buffalo_l contains the best detection and recognition models natively!
-face_app = FaceAnalysis(name='buffalo_l', allowed_modules=['detection', 'recognition'])
-face_app.prepare(ctx_id=-1, det_size=(256, 256))
+face_app = FaceAnalysis(name='buffalo_s', allowed_modules=['detection', 'recognition'])
+face_app.prepare(ctx_id=-1, det_size=(160, 160))
 ai_lock = threading.Lock() # 🚦 Traffic light to prevent thread crashes
 print("✅ InsightFace Models Loaded Successfully!")
 
@@ -737,10 +737,10 @@ def process_frame(image_b64):
             print(f"🔍 Zoom-out burst: {current_count} people. Recovering...")
         _prev_person_count = current_count
         
-        # STRICT: never more than 2 heavy AI calls per frame
-        MAX_HEAVY_AI = 2
+        # We can safely process more faces now because buffalo_s is ultra-light!
+        MAX_HEAVY_AI = 3
     else:
-        MAX_HEAVY_AI = 1
+        MAX_HEAVY_AI = 2
 
     if results and results[0].boxes is not None and results[0].boxes.id is not None:
         boxes = results[0].boxes.xyxy.cpu().numpy()
