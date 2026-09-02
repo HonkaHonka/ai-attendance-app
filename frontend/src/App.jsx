@@ -70,22 +70,15 @@ function App() {
 
   const getCanvasContentBounds = (canvas) => {
     const rect = canvas.getBoundingClientRect();
-    const canvasRatio = AI_W / AI_H;
-    const rectRatio = rect.width / rect.height;
-
-    let contentWidth, contentHeight, offsetX, offsetY;
-
-    if (rectRatio > canvasRatio) {
-      contentHeight = rect.height;
-      contentWidth = contentHeight * canvasRatio;
-      offsetX = (rect.width - contentWidth) / 2;
-      offsetY = 0;
-    } else {
-      contentWidth = rect.width;
-      contentHeight = contentWidth / canvasRatio;
-      offsetX = 0;
-      offsetY = (rect.height - contentHeight) / 2;
-    }
+    // 'cover' math uses Math.max instead of tracking aspect ratios
+    const scale = Math.max(rect.width / AI_W, rect.height / AI_H);
+    
+    const contentWidth = AI_W * scale;
+    const contentHeight = AI_H * scale;
+    
+    const offsetX = (rect.width - contentWidth) / 2;
+    const offsetY = (rect.height - contentHeight) / 2;
+    
     return { contentWidth, contentHeight, offsetX, offsetY, rect };
   };
 
