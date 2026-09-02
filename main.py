@@ -6,9 +6,9 @@ import openvino as ov
 _original_compile_model = ov.Core.compile_model
 
 def _patched_compile_model(self, model, device_name=None, config=None):
-    if device_name in ("AUTO", "AUTO:CPU,GPU", "AUTO:GPU,CPU", None, "CPU"):
-        print(f"🔄 OpenVINO device override: {device_name} → GPU")
-        device_name = "GPU"
+    # 🎯 FIX: Force YOLO to stay on the CPU!
+    print(f"🔄 OpenVINO device override: {device_name} → CPU")
+    device_name = "CPU"
     return _original_compile_model(self, model, device_name, config)
 
 ov.Core.compile_model = _patched_compile_model
@@ -121,12 +121,16 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
-print("🔹 Loading InsightFace (ArcFace 512D + RetinaFace)...")
-# buffalo_l contains the best detection and recognition models natively!
-face_app = FaceAnalysis(name='buffalo_s', allowed_modules=['detection', 'recognition'])
-face_app.prepare(ctx_id=-1, det_size=(160, 160))
+print("🔹 Loading InsightFace (ArcFace 512D + RetinaFace) on INTEL GPU...")
+# 🎯 FIX: We add "DmlExecutionProvider" to force ONNX to use the Intel Iris Xe GPU!
+face_app = FaceAnalysis(
+    name='buffalo_s', 
+    allowed_modules=['detection', 'recognition'],
+    providers=['DmlExecutionProvider', 'CPUExecutionProvider']
+)
+face_app.prepare(ctx_id=0, det_size=(160, 160)) # ctx_id=0 enables GPU context
 ai_lock = threading.Lock() # 🚦 Traffic light to prevent thread crashes
-print("✅ InsightFace Models Loaded Successfully!")
+print("✅ InsightFace Models Loaded on GPU Successfully!")
 
 
 
