@@ -121,17 +121,23 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
-print("🔹 Loading InsightFace (MobileFaceNet) on INTEL GPU...")
-# 🎯 FIX: Use DirectML and buffalo_s
+print("🔹 Loading InsightFace (MobileFaceNet) on Intel GPU via OpenVINO...")
+
+# 🎯 FIX: We use OpenVINOExecutionProvider and target the GPU!
+openvino_provider_options = {
+    'device_type': 'GPU' # Forces OpenVINO to use the Intel Iris Xe
+}
+
 face_app = FaceAnalysis(
     name='buffalo_s', 
     allowed_modules=['detection', 'recognition'],
-    providers=['DmlExecutionProvider', 'CPUExecutionProvider']
+    providers=[('OpenVINOExecutionProvider', openvino_provider_options), 'CPUExecutionProvider']
 )
-# Force strict 160x160 size
-face_app.prepare(ctx_id=0, det_size=(160, 160))
-ai_lock = threading.Lock() # 🚦 Traffic light to prevent thread crashes
-print("✅ InsightFace Models Loaded Successfully!")
+
+# Keep the small 160x160 det_size for maximum speed
+face_app.prepare(ctx_id=0, det_size=(160, 160)) 
+ai_lock = threading.Lock() 
+print("✅ InsightFace Models Loaded on OpenVINO GPU Successfully!")
 
 
 
